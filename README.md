@@ -3,8 +3,26 @@
 Redes de Computadores I · UdeA 2026-2 · Proyecto 01
 
 Se transmite un bloque de celdas (letras y recuadros) prendiendo y apagando dos
-luces, una roja y una verde. Una persona las opera y otra las mira; no hace
-falta hacer cuentas ni memorizar nada.
+luces, una roja y una verde.
+
+Hay **dos modos**, y cada uno tiene su carpeta:
+
+| modo | quién lee las luces | carpeta |
+|---|---|---|
+| **Manual** | una persona, pulsando teclas | [`manual/`](manual/) |
+| **Cámara** | una cámara, con procesamiento de imagen | [`camara/`](camara/) |
+
+Los dos mandan el mismo bloque por las mismas dos luces, pero **no usan la
+misma codificación** y no se entienden entre sí: el manual está hecho para que
+una persona pueda seguirlo a ojo, y el de cámara para exprimir el canal. Cada
+carpeta es independiente y se puede usar sin la otra.
+
+---
+
+# Modo manual
+
+Una persona opera las luces y otra las mira; no hace falta hacer cuentas ni
+memorizar nada.
 
 ## Archivos
 
@@ -147,3 +165,107 @@ sale como un toque rápido y no siempre igual de corto).
 resistencia de 220 Ω; para 110 V hace falta un módulo de relé. Se elige el
 puerto en la ventana del transmisor y se pulsa **Conectar**
 (`python -m pip install pyserial`).
+
+---
+
+# Modo cámara
+
+El mismo bloque, pero leído por una cámara. Sirve para grabar la transmisión
+con un celular y descifrarla después, o para escuchar en vivo.
+
+## Archivos
+
+| archivo | qué es |
+|---|---|
+| `camara/rx_camara.py` | **Receptor.** Un solo archivo: no necesita ningún otro. |
+
+Se abre con el **botón de play de VS Code** y sale una ventana con los videos
+que encuentre en su carpeta (y en las subcarpetas), o se escoge otro con
+*Buscar otro archivo*. También hay botón para la cámara en vivo.
+
+Necesita dos librerías:
+
+```
+python -m pip install numpy opencv-python
+```
+
+Para comprobar que la codificación quedó bien, sin cámara ni video:
+
+```
+python rx_camara.py --autoprueba
+```
+
+## La codificación
+
+**Cuatro estados**, los mismos del modo manual:
+
+| | luz A (roja) | luz B (verde) |
+|:---:|:---:|:---:|
+| `0` | apagada | apagada |
+| `1` | **ON** | apagada |
+| `2` | apagada | **ON** |
+| `3` | **ON** | **ON** |
+
+**La regla: dos símbolos seguidos nunca son iguales.** Desde un estado hay 3
+destinos posibles, así que cada símbolo lleva un dígito en base 3. Eso tiene
+dos consecuencias que importan:
+
+* Cada frontera de símbolo se ve como un **cambio**, así que el receptor no
+  tiene que recuperar el reloj ni saber la velocidad de antemano.
+* 3 bits caben en 2 dígitos base 3, o sea **1,5 bits por símbolo**. El límite
+  teórico es log₂3 = 1,585: se aprovecha el 95 %.
+
+**La trama** lleva todo el bloque de una vez, no una trama por fila:
+
+```
+PREÁMBULO      1 2 1 2 1 2 1 2 1 2 1 2     alternancia roja/verde
+SFD            3 0                          los dos estados que el preámbulo no toca
+CABECERA       tipo 4b · filas 5b · cols 5b · nbits 10b · CRC-8 8b
+PAYLOAD        celdas: 00 = negro, 01 = blanco, 1+5 bits = letra
+CRC-16         de la cabecera y el payload
+```
+
+La cabecera lleva CRC propio para que, si el payload se corrompe, todavía se
+sepan las dimensiones y se pueda pintar lo que sí llegó (las celdas perdidas
+salen en rojo).
+
+## Cuántos cuadros por segundo hacen falta
+
+Como cada símbolo se reconoce por el **cambio** de las luces, para ver un
+cambio hacen falta cuadros a los dos lados. La regla medida sobre grabaciones
+reales es de **3 cuadros por símbolo como mínimo**:
+
+| fps del video | cuadros/símbolo a 12,5 sím/s | resultado |
+|---|---|---|
+| 54,1 | 4,3 | ✅ CRC válido |
+| 27,1 | 2,2 | ❌ nada — **y es el mismo video, decimado** |
+| 23,8 | 1,9 | ❌ nada |
+
+O sea: **la velocidad máxima es fps/3**. A 30 fps son 10 símbolos/s; a 60 fps,
+20. Si no engancha, el programa lo dice con esos números en vez de dejar a uno
+adivinando.
+
+Conviene grabar a 60 fps siempre que se pueda. No hace falta que haya luz
+ambiente: lo que manda es la tasa de cuadros.
+
+## Cómo encuentra las luces
+
+Busca lo que **parpadea**, no lo más brillante: se calcula la desviación
+estándar temporal de cada píxel, y el fondo (paredes, faroles, el cielo) sale
+plano. Pero quedarse solo con el máximo falla cuando la luz está cerca y
+satura, porque su núcleo se clava en 255 y su varianza baja — en unas pruebas
+ganaba siempre la pantalla de un computador del fondo. Por eso se generan
+**varios recuadros candidatos** (por varianza, por brillo, y por el producto de
+los dos) y se prueban en orden hasta que uno dé CRC válido.
+
+Y las dos luces **no se separan por posición**: a 300 m dos luces separadas
+20 cm caen en unos 2 píxeles y se funden. Se separan por color, midiendo dentro
+del recuadro:
+
+```
+luminancia = (R+G+B)/3      apagado o encendido
+croma      = (R−G)/(R+G)    roja (+) · verde (−) · las dos (~0)
+```
+
+Se resta el verde y no el azul a propósito: el LED rojo se ve **magenta** en la
+cámara, porque satura también el canal azul.
