@@ -1,36 +1,23 @@
 # -*- coding: utf-8 -*-
-"""
-tx_manual.py -- TRANSMISOR manual (una sola ventana)
-Sistema de Comunicación Simple · Redes de Computadores I · UdeA 2026-2
+"""TRANSMISOR: se digita la cuadricula y la ventana dice que luces prender.
 
-Se ejecuta con el botón de play de VS Code. No hay opciones de línea de
-comandos: todo se maneja desde la ventana.
+Dos modos, se cambian con F5:
+  EDITAR       se escribe la cuadricula.  . espacio # = negro   - _ = blanco
+               letras A..Z N   flechas   ENTER = fila siguiente   Ctrl+Z
+  TRANSMITIR   se elige una unidad a la derecha y ESPACIO la reproduce; las
+               dos bolas grandes van diciendo, simbolo a simbolo, que prender
 
-QUÉ HACE
---------
-1. MODO EDITAR     Se digita la cuadrícula con el teclado, como en una hoja.
-2. MODO TRANSMITIR El programa muestra, símbolo por símbolo, qué luces hay que
-                   prender. El operador solo copia lo que ve en la pantalla.
-                   Si hay un Arduino conectado, además lo hace él solo.
+El ARDUINO ES OPCIONAL, y opcional quiere decir que el programa hace lo mismo
+sin el: la diferencia es quien mueve el interruptor. Sin Arduino lo mueve una
+persona mirando la pantalla; con Arduino lo mueve la placa, con la
+temporizacion exacta (util sobre todo para el mini parpadeo, que a mano sale
+como un toque rapido y no siempre igual de corto).
 
-La codificación NO está aquí: está toda en codigo_manual.py. Este archivo solo
-dibuja y cronometra.
+El teclado siempre es de la cuadricula: las filas y columnas se cambian con
+botones + y -, no escribiendo, asi que ninguna casilla de texto se lo puede
+robar. Si aun asi se va (el deslizador si toma foco), ESC lo devuelve.
 
-EL TECLADO SIEMPRE ES DE LA CUADRÍCULA
---------------------------------------
-Las filas y las columnas se cambian con botones + y -, no escribiendo en una
-casilla. Así no hay ningún campo de texto que se robe el teclado: si se pulsa
-una letra, siempre va a parar a la cuadrícula. (Por si acaso, ESC o un clic en
-la cuadrícula también devuelven el teclado, y mientras no lo tenga se ve
-atenuada.)
-
-TECLAS
-------
-  Modo EDITAR       . o ESPACIO o # = negro   - o _ = blanco   A..Z Ñ = letra
-                    flechas = mover   ENTER = fila siguiente
-                    RETROCESO = borrar y retroceder   Ctrl+Z = deshacer
-  Modo TRANSMITIR   ESPACIO = arrancar/parar    flechas = mover a mano
-  Siempre           F5 = cambiar de modo        ESC = volver a la cuadrícula
+La codificacion no esta aqui, esta en codigo_manual.py.
 """
 
 import time
@@ -55,11 +42,11 @@ MAX_CELDAS = 80          # el máximo que pide el enunciado
 
 
 # =========================================================================
-#  ARDUINO (opcional)
+#  ARDUINO
 #
-#  Todo esto sobra si se transmite a mano: si no hay pyserial o no hay placa,
-#  el programa funciona igual como teleprompter. El firmware está en
-#  relaylink/relaylink.ino.
+#  Nada de esto hace falta para transmitir: es solo para no tener que mover el
+#  interruptor a mano. Si no hay pyserial o no hay placa, el resto del programa
+#  funciona igual. Firmware en relaylink/relaylink.ino.
 # =========================================================================
 def puertos_disponibles():
     try:
@@ -156,6 +143,9 @@ class TxManual(object):
 
         self._construir()
         self.nueva_cuadricula(self.filas, self.cols)
+        self.lbl_est.config(text="Las luces las prende una persona siguiendo esta "
+                                 "pantalla. Conectar un Arduino solo automatiza "
+                                 "eso; sin él funciona igual.", fg="#888888")
         self._bucle()
 
     # ------------------------------------------------------------ montaje --
@@ -207,8 +197,9 @@ class TxManual(object):
         self.esc_t.set(self.periodo)
         self.esc_t.pack(side="left", padx=4)
 
-        tk.Label(top2, text="   Arduino (opcional):", bg=FONDO,
-                 fg="white").pack(side="left")
+        tk.Label(top2, text="   Luces:", bg=FONDO, fg="white").pack(side="left")
+        tk.Label(top2, text="a mano  ·  o con Arduino en", bg=FONDO,
+                 fg="#888888").pack(side="left", padx=(2, 4))
         # readonly = no se puede escribir dentro, así no captura el teclado
         self.cbo = ttk.Combobox(top2, width=9, state="readonly",
                                 values=puertos_disponibles())

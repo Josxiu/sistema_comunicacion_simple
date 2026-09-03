@@ -1,39 +1,21 @@
 # -*- coding: utf-8 -*-
-"""
-rx_manual.py -- RECEPTOR manual asistido (una sola ventana)
-Sistema de Comunicación Simple · Redes de Computadores I · UdeA 2026-2
+"""RECEPTOR: la persona mira las luces y pulsa teclas; el programa descifra.
 
-Se ejecuta con el botón de play de VS Code. No hay opciones de línea de
-comandos.
+No hay que hacer cuentas ni mirar la tabla. Cada vez que las luces cambian se
+pulsa la tecla de lo que se ve:
 
-CÓMO SE USA
------------
-La persona que mira las luces NO hace cuentas ni consulta tablas. Solo pulsa la
-tecla del estado que ve, CADA VEZ QUE LAS LUCES CAMBIAN:
+    1 = solo ROJA    2 = solo VERDE    3 = LAS DOS    0 = NINGUNA
 
-        1 = solo ROJA      2 = solo VERDE      3 = LAS DOS      0 = NINGUNA
+Y la regla del mini parpadeo: si la luz se corta un instante y vuelve IGUAL,
+es el mismo simbolo dos veces, o sea que se pulsa la MISMA tecla otra vez. Un
+apagon de un tiempo entero si es el separador, y ahi va el 0.
 
-Y una regla más, la del MINI PARPADEO: si la luz se corta un instante y vuelve
-IGUAL que estaba, es que el mismo símbolo va dos veces seguidas, así que se
-pulsa la MISMA TECLA OTRA VEZ. Ese parpadeo es cortito; no hay que confundirlo
-con el separador, que es un tiempo de oscuridad entero (ahí sí se pulsa 0).
+El programa va armando el bloque y marca cada fila como ok, con error o que
+falta: eso es exactamente lo que hay que pedir que repitan. Si se pierde un
+simbolo, la siguiente oscuridad vuelve a sincronizar y solo se dana una celda.
 
-El programa arma el bloque solo y muestra, fila por fila, cuál llegó bien, cuál
-llegó con error y cuál falta. Así el receptor sabe exactamente qué pedir que
-repitan (y en este código cada fila se puede repetir sola).
-
-POR QUÉ ES DIFÍCIL EQUIVOCARSE
-------------------------------
-  · No hay que contar tiempos: se reacciona a los CAMBIOS, y el mini parpadeo
-    hace que hasta los símbolos repetidos sean un cambio.
-  · Si se pierde un símbolo, la siguiente oscuridad vuelve a sincronizar: se
-    daña una celda, no el resto del mensaje.
-  · La suma de control de cada fila avisa si esa fila llegó mal.
-
-La codificación no está aquí: está toda en codigo_manual.py.
-
-La caja "pegar secuencia" sirve para practicar sin montar las luces: se pega lo
-que copió tx_manual.py y se ve cómo se va dibujando la matriz.
+La caja de pegar sirve para practicar sin luces: se pega lo que copia
+tx_manual.py. La codificacion esta en codigo_manual.py.
 """
 
 import time

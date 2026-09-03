@@ -1,94 +1,31 @@
 # -*- coding: utf-8 -*-
-"""
-codigo_manual.py -- EL CÓDIGO DE LÍNEA del modo manual
-Sistema de Comunicación Simple · Redes de Computadores I · UdeA 2026-2
+"""EL CODIGO: como se convierte una celda en destellos de las dos luces.
 
-Este es el ÚNICO archivo donde vive la codificación. El transmisor
-(tx_manual.py) y el receptor (rx_manual.py) no saben nada del código: los dos
-llaman aquí. Si algún día se cambia el alfabeto, la cabecera o la suma de
-control, se cambia AQUÍ y los dos programas quedan al día solos.
+Este es el unico archivo donde vive la codificacion. tx_manual.py y
+rx_manual.py no la conocen: los dos llaman aqui. Si se cambia el alfabeto o la
+suma de control, se cambia aqui y los dos quedan al dia.
 
-===========================================================================
- 1. LOS CUATRO ESTADOS DE LAS LUCES
-===========================================================================
-Hay dos luces: A (roja) y B (verde). Entre las dos forman 4 estados:
+LOS CUATRO ESTADOS      LA CELDA
+  --  las dos apagadas    --  A-      recuadro negro   #
+  A-  solo la roja        --  -B      recuadro blanco  _
+  -B  solo la verde       --  x x x   letra: 3 destellos en base 3
+  AB  las dos                         (3x3x3 = 27 = las 27 letras justas)
 
-        símbolo   luz A     luz B    se escribe   significa
-        -------   -------   ------   ----------   ---------------------
-           0      apagada   apagada      --       SEPARADOR
-           1      ENCENDIDA apagada      A-       dígito 0
-           2      apagada   ENCENDIDA    -B       dígito 1
-           3      ENCENDIDA ENCENDIDA    AB       dígito 2
+Todos los simbolos duran lo mismo. El '--' separa CELDAS, y las FILAS las
+separa el preambulo A- -B A- -B: cuatro destellos seguidos, que dentro de los
+datos son imposibles (una letra son tres como mucho).
 
-Todos los símbolos duran LO MISMO (T_SIMBOLO_S). El separador NO es una pausa
-larga: es un tiempo de oscuridad igual de largo que cualquier destello. Lo
-único que lo hace especial es que nunca lleva información.
+    CABECERA  preambulo | -- 26 | -- filas | -- cols | --
+    FILA i    preambulo | -- i  | -- n     | -- celda -- celda ... | -- suma | --
 
-===========================================================================
- 2. CÓMO SE ESCRIBE UNA CELDA
-===========================================================================
-Cada celda empieza con oscuridad y sigue con destellos:
+Cada fila viaja aparte con su suma de control, asi que se repite sola.
 
-    --  +  UN destello    ->  recuadro:   A- = negro (#)   -B = blanco (_)
-    --  +  TRES destellos ->  letra:      número en base 3, 3x3x3 = 27 letras
+Un digito repetido dejaria la luz quieta dos tiempos y habria que contar
+cuanto duro. Por eso emision() mete un MINI PARPADEO: corta la luz un cuarto
+de tiempo antes de repetirla. Eso no cambia el codigo, solo como se emite.
 
-O sea que el receptor solo tiene que hacer esto: ver oscuridad, contar los
-destellos hasta la siguiente oscuridad. 1 destello = recuadro, 3 = letra.
-(Un solo destello AB queda reservado: no significa nada, por ahora.)
-
-===========================================================================
- 3. CÓMO SE SEPARAN LAS FILAS
-===========================================================================
-El separador '--' separa CELDAS. Las filas se separan con el PREÁMBULO:
-cuatro destellos alternados A- -B A- -B seguidos, sin oscuridad en medio.
-
-Eso se puede reconocer sin ambigüedad porque dentro de los datos nunca hay
-más de TRES destellos seguidos (una letra), y siempre vienen después de una
-oscuridad. Así que ver el cuarto destello seguido significa, siempre,
-"aquí empieza una unidad nueva".
-
-Cada fila es una unidad INDEPENDIENTE, con su índice y su suma de control.
-Si una fila llega mal, se pide esa sola y se repite esa sola.
-
-    CABECERA:  preámbulo | -- 26 | -- filas | -- cols | --
-    FILA i:    preámbulo | -- i  | -- n     | -- celda -- celda ... | -- suma | --
-
-    (26 = AB AB AB es el índice reservado que marca "esto es la cabecera";
-     las filas de verdad van de 0 a 25.)
-
-===========================================================================
- 4. EL MINI PARPADEO
-===========================================================================
-Hay letras con dos dígitos iguales seguidos (por ejemplo A- A-). Ahí la luz se
-quedaría QUIETA dos tiempos, y el receptor tendría que CONTAR cuánto duró en
-vez de simplemente ver el cambio. Eso era lo único incómodo del sistema.
-
-Se arregla con un MINI PARPADEO: cuando un dígito repite al anterior, la luz se
-apaga un instante corto (un cuarto de tiempo) antes de volver a encenderse.
-
-    sin parpadeo (mal)    A-------A-------      ¿fue uno largo o dos?
-    con parpadeo (bien)   A------ A-------      dos, se ve el corte
-
-Así TODAS las fronteras entre símbolos se ven, y el receptor nunca cuenta
-tiempos: cada vez que la luz cambia (o parpadea) pulsa una tecla, y si la luz
-vuelve igual que antes, pulsa la misma tecla otra vez.
-
-El parpadeo es corto A PROPÓSITO: no se puede confundir con el separador '--',
-que es un tiempo de oscuridad ENTERO. Es la diferencia entre "la luz tembló" y
-"la luz se apagó", que se ve a simple vista sin medir nada.
-
-Esto NO cambia el código: los símbolos siguen siendo los mismos y el
-decodificador es el mismo. El parpadeo solo cambia CÓMO SE EMITEN.
-
-POR QUÉ EL ALFABETO NO ESTÁ EN ORDEN ALFABÉTICO
------------------------------------------------
-De las 27 combinaciones, solo 12 no repiten ningún dígito, o sea que no
-necesitan ningún parpadeo. Esas 12 se le dan a las 12 letras más frecuentes del
-español (E A O S R N I D L C T U) y las 15 restantes a las raras, para que un
-texto normal salga lo más limpio posible. Con el parpadeo ya no es una
-necesidad, pero sigue siendo gratis, así que se deja.
-
-La POSICIÓN de la letra en ALFABETO_MANUAL es el número que se transmite.
+Ejecutar este archivo imprime la tabla de letras y comprueba que codificar y
+decodificar dan lo mismo. La explicacion completa esta en LEEME.md.
 """
 
 # ==========================================================================
@@ -129,8 +66,13 @@ BLANCO = "_"     # recuadro blanco
 # Alfabeto español de 27 letras, en orden, para mostrarlo en pantalla.
 ALFABETO = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZ"
 
-# Alfabeto en ORDEN DE TRANSMISIÓN (ver nota 4 arriba). La posición aquí
+# El mismo alfabeto en ORDEN DE TRANSMISIÓN: la posición de cada letra aquí
 # es el número en base 3 que viaja por las luces.
+#
+# No es alfabético a propósito. Solo 12 de las 27 combinaciones no repiten
+# ningún dígito, o sea que salen sin ningún parpadeo; esas 12 se les dan a las
+# 12 letras más frecuentes del español (E A O S R N I D L C T U) para que un
+# texto normal se vea lo más limpio posible.
 ALFABETO_MANUAL = "XMPEBAOSGVRNYWQIDHFLCTZUJÑK"
 
 # ------------------------------------------------------------ unidades ----
@@ -242,7 +184,7 @@ def bloque(grid):
 
 
 # ==========================================================================
-#  EL MINI PARPADEO  (ver nota 4 arriba)
+#  EL MINI PARPADEO
 # ==========================================================================
 def repite(simbolos, i):
     """¿El símbolo i es igual al anterior? Entonces necesita mini parpadeo.
