@@ -280,6 +280,31 @@ Para comprobar que la codificación quedó bien, sin cámara ni video:
 python rx_camara.py --autoprueba
 ```
 
+**Todo lo ajustable está junto**, en el bloque `PARAMETROS` del principio del
+archivo: cómo están puestas las luces, la velocidad, la cámara, la exposición.
+No hay que bajar al código para cambiar nada de eso.
+
+## Las dos luces: por color o por posición
+
+Hay dos maneras de saber cuál de las dos luces está prendida, y cuál sirve
+depende de **cómo se vean en la imagen**, no de qué LED se compre:
+
+| | cuándo | exige |
+|---|---|---|
+| **por color** | las dos luces caen en el mismo punto de la imagen (a 300 m dos luces separadas 20 cm caen en ~2 píxeles: se funden) | colores distintos |
+| **por posición** | se ven como dos puntos separados | nada: **sirven dos luces iguales, blancas incluidas** |
+
+Comprobado con videos de prueba generados a propósito:
+
+| luces | se funden en la imagen | se ven separadas |
+|---|---|---|
+| **dos colores** | ✅ por color | ✅ por posición |
+| **mismo color** | ❌ imposible | ✅ por posición |
+
+`MODO_LUCES = "auto"` (el de fábrica) prueba las dos y se queda con la que dé
+CRC válido. Cuando no engancha porque las luces están fundidas y son del mismo
+color, lo dice con esas palabras en vez de dejarte adivinando.
+
 ## La codificación
 
 **Cuatro estados**, los mismos del modo manual:
@@ -354,3 +379,30 @@ croma      = (R−G)/(R+G)    roja (+) · verde (−) · las dos (~0)
 
 Se resta el verde y no el azul a propósito: el LED rojo se ve **magenta** en la
 cámara, porque satura también el canal azul.
+
+## La cámara en vivo
+
+```
+python rx_camara.py --camaras          lista las que responden y su número
+python rx_camara.py --camara 1         escucha esa
+```
+
+Mientras escucha: **q** sale · **r** reinicia la escucha · **+** y **−** suben
+y bajan la exposición. El descifrado corre aparte, así que la ventana responde
+siempre. El bloque se **congela** en cuanto un CRC cuadra, para no pisarlo con
+una lectura peor.
+
+Si la imagen sale negra, el programa lo dice en pantalla con las causas
+probables: tapa de privacidad del portátil, otra aplicación que ya tiene la
+cámara cogida, o exposición demasiado baja.
+
+### Conectar otra cámara
+
+| qué | cómo |
+|---|---|
+| **Celular** (lo mejor: graba a 60 fps) | una app que publique la cámara en la red — `--camara http://192.168.1.5:8080/video`. Con DroidCam, Iriun o EpocCam ni eso: salen como una cámara más en `--camaras` |
+| **Réflex o cámara de video** | capturadora HDMI-USB, o el programa del fabricante (Webcam Utility); luego el número que diga `--camaras` |
+| **Cámara IP** | `--camara "rtsp://usuario:clave@192.168.1.9:554/stream1"` |
+
+Sea cual sea, lo único que decide la velocidad máxima es que entregue **60
+cuadros por segundo de verdad**.
