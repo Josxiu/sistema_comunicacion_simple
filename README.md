@@ -291,9 +291,52 @@ con un celular y descifrarla después, o para escuchar en vivo.
 
 | archivo | qué es |
 |---|---|
+| `camara/tx_camara.py` | **Transmisor.** Se digita la cuadrícula y las luces la emiten. |
 | `camara/rx_camara.py` | **Receptor.** Un solo archivo: no necesita ningún otro. |
 
-Se abre con el **botón de play de VS Code** y sale una ventana con los videos
+El firmware del Arduino es **el mismo del modo manual**
+([`manual/relaylink/relaylink.ino`](manual/relaylink/relaylink.ino)), sin
+cambiarle nada: recibe una lista de estados y los sostiene el tiempo que se le
+diga. Lo único distinto es el período — aquí son decenas de milisegundos en
+vez de un segundo.
+
+Los dos se abren con el **botón de play de VS Code** y no llevan argumentos.
+
+## El transmisor
+
+Se escribe la cuadrícula igual que en el modo manual: `.` espacio `#` = negro,
+`-` `_` = blanco, letras `A..Z Ñ`, el tamaño con los botones **+** y **−**, y
+`Ctrl+Z` deshace. **F5** pasa a TRANSMITIR y **espacio** lanza la trama.
+
+La diferencia con el manual es la velocidad: aquí las luces van a 5–20 símbolos
+por segundo, así que **no las puede mover una persona**. Las mueve el Arduino,
+o el **modo PANTALLA** (F8), que parpadea dos círculos a pantalla completa para
+apuntarles la cámara y probar el sistema entero sin montar nada.
+
+**PARAR** (Esc, o el botón) para las luces de verdad, no solo la cuenta de la
+pantalla: al Arduino se le manda la trama entera de un golpe y se queda ocupado
+varios segundos, así que hay que decirle que corte.
+
+Las teclas `1 2 3 0` prenden y apagan las luces a mano sin transmitir nada
+—para apuntarlas y comprobar el cableado— y `*` manda el aviso. Son las mismas
+del receptor manual.
+
+La ventana avisa **si la velocidad elegida se pasa de lo que la cámara puede
+seguir**, que es la comprobación más útil: pasarse no da un error, da una
+grabación que no se puede descifrar, y eso no se descubre hasta después de
+transmitir.
+
+### Cuántas copias mandar
+
+**Con una basta.** El receptor corta la grabación en ráfagas y le vale con que
+una pase el CRC; comprobado sobre la grabación buena, cada copia por separado
+se descifra entera. Las copias de más son un seguro por si a una le pasa algo
+—alguien se cruza, la cámara se mueve—, no un requisito: 2 es un término medio
+cómodo y 3 solo si el enlace está feo.
+
+## El receptor
+
+Sale una ventana con los videos
 que encuentre en su carpeta (y en las subcarpetas), o se escoge otro con
 *Buscar otro archivo*. También hay botón para la cámara en vivo.
 
