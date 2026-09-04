@@ -2,14 +2,17 @@
 """EL CODIGO: como se convierte una celda en destellos de las dos luces.
 
 Este es el unico archivo donde vive la codificacion. tx_manual.py y
-rx_manual.py no la conocen: los dos llaman aqui. Si se cambia el alfabeto o la
-suma de control, se cambia aqui y los dos quedan al dia.
+rx_manual.py no la conocen: los dos llaman aqui. Para cambiar el codigo hay
+dos sitios y solo dos:
+
+    PARAMETROS       los tiempos (velocidad, parpadeo, aviso)
+    TABLA DEL CODIGO que destellos es cada letra y cada recuadro
 
 LOS CUATRO ESTADOS      LA CELDA
   --  las dos apagadas    --  A-      recuadro negro   #
   A-  solo la roja        --  -B      recuadro blanco  _
-  -B  solo la verde       --  x x x   letra: 3 destellos en base 3
-  AB  las dos                         (3x3x3 = 27 = las 27 letras justas)
+  -B  solo la verde       --  x x x   letra: 3 destellos
+  AB  las dos
 
 Todos los simbolos duran lo mismo. El '--' separa CELDAS, y las FILAS las
 separa el preambulo A- -B A- -B: cuatro destellos seguidos, que dentro de los
@@ -24,28 +27,45 @@ Un digito repetido dejaria la luz quieta dos tiempos y habria que contar
 cuanto duro. Por eso emision() mete un MINI PARPADEO: corta la luz un cuarto
 de tiempo antes de repetirla. Eso no cambia el codigo, solo como se emite.
 
-Ejecutar este archivo imprime la tabla de letras y comprueba que codificar y
-decodificar dan lo mismo. La explicacion completa esta en LEEME.md.
+Ejecutar este archivo imprime la tabla y comprueba que codificar y decodificar
+dan lo mismo. La explicacion completa esta en LEEME.md.
 """
 
-# ==========================================================================
-#  TIEMPOS -- lo único que hay que tocar para cambiar la velocidad
-# ==========================================================================
-# Segundos que dura CADA símbolo (destellos y separadores por igual).
-#   1.0  = cómodo para aprender y para un receptor nuevo
-#   0.7  = ritmo de una pareja entrenada
-#   0.5  = rápido; solo si el receptor ya se sabe el código
+
+# ##########################################################################
+#
+#   P A R A M E T R O S
+#
+#   Todo lo que se puede ajustar esta aqui. Nada de esto esta repetido en
+#   tx_manual.py ni en rx_manual.py: los dos leen estos valores.
+#
+# ##########################################################################
+
+# --- velocidad ------------------------------------------------------------
+# Segundos que dura CADA simbolo, destellos y separadores por igual.
+#   1.0  comodo para aprender y para un receptor nuevo
+#   0.7  ritmo de una pareja entrenada
+#   0.5  rapido; solo si el receptor ya se sabe el codigo
 T_SIMBOLO_S = 1.0
 
-# Pausa extra entre una unidad y la siguiente (cabecera, fila 0, fila 1...).
-# Le da tiempo al receptor de anotar y prepararse para la fila que sigue.
+# --- mini parpadeo --------------------------------------------------------
+# En cuantos trozos se parte cada simbolo. El parpadeo dura UN trozo, o sea
+# 1/SUBRANURAS de simbolo. Con 4 el parpadeo es un cuarto de tiempo: corto
+# para que no se confunda con el separador, largo para que se vea.
+# Subirlo a 8 lo hace mas breve; bajarlo a 2 lo hace medio simbolo.
+SUBRANURAS = 4
+
+# --- separacion entre unidades --------------------------------------------
+# Pausa despues de cada unidad (cabecera, fila 0, fila 1...). Le da tiempo al
+# receptor de anotar y de prepararse para la fila siguiente. No forma parte
+# del codigo: es tiempo muerto, se puede poner a 0 sin romper nada.
 PAUSA_ENTRE_UNIDADES_S = 2.0
 
-# En cuántos trozos se parte cada símbolo. El mini parpadeo dura UN trozo, o
-# sea 1/SUBRANURAS de un símbolo. Con 4 el parpadeo es un cuarto de tiempo:
-# corto para que no se confunda con el separador, largo para que se vea.
-SUBRANURAS = 4
-# ==========================================================================
+# --- aviso ("preparense, voy a transmitir") -------------------------------
+# Las dos luces parpadeando rapido. Va mucho mas rapido que un simbolo, asi
+# que es imposible confundirlo con datos.
+AVISO_DESTELLOS = 6            # cuantas veces prenden y apagan
+AVISO_T_S = 0.12               # cuanto dura cada prendida y cada apagada
 
 
 # ------------------------------------------------------------ estados -----
@@ -55,25 +75,74 @@ LUZ_B = 2        # -B   solo la verde
 AMBAS = 3        # AB   las dos
 
 NOMBRE = {SEP: "--", LUZ_A: "A-", LUZ_B: "-B", AMBAS: "AB"}
+ESTADO = {v: k for k, v in NOMBRE.items()}        # "-B" -> LUZ_B
 
-# Los tres estados ENCENDIDOS son los dígitos en base 3.
-DIGITOS = [LUZ_A, LUZ_B, AMBAS]        # A-=0, -B=1, AB=2
+# Los tres estados ENCENDIDOS, en orden, son los digitos en base 3.
+DIGITOS = [LUZ_A, LUZ_B, AMBAS]                   # A-=0, -B=1, AB=2
 
-# ------------------------------------------------------------ celdas ------
 NEGRO = "#"      # recuadro negro
 BLANCO = "_"     # recuadro blanco
 
-# Alfabeto español de 27 letras, en orden, para mostrarlo en pantalla.
+# El alfabeto espanol, en orden, para validar lo que se teclea y para
+# imprimir la tabla ordenada.
 ALFABETO = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZ"
 
-# El mismo alfabeto en ORDEN DE TRANSMISIÓN: la posición de cada letra aquí
-# es el número en base 3 que viaja por las luces.
+
+# ##########################################################################
 #
-# No es alfabético a propósito. Solo 12 de las 27 combinaciones no repiten
-# ningún dígito, o sea que salen sin ningún parpadeo; esas 12 se les dan a las
-# 12 letras más frecuentes del español (E A O S R N I D L C T U) para que un
-# texto normal se vea lo más limpio posible.
-ALFABETO_MANUAL = "XMPEBAOSGVRNYWQIDHFLCTZUJÑK"
+#   T A B L A   D E L   C O D I G O
+#
+#   Esto es el codigo. Se lee tal cual: la letra A son los tres destellos
+#   A- -B AB, o sea roja, verde, las dos. Para cambiar el reparto basta con
+#   reescribir estas lineas; el resto del programa se entera solo.
+#
+#   Las 27 letras usan las 27 combinaciones de 3 destellos (3x3x3), asi que
+#   no sobra ni falta ninguna. El orden NO es alfabetico a proposito: 12 de
+#   las 27 combinaciones no repiten ningun digito y por tanto salen sin
+#   ningun parpadeo; esas 12 se les dieron a las 12 letras mas frecuentes
+#   del espanol (E A O S R N I D L C T U). Las que si repiten van marcadas
+#   con (p) de parpadeo.
+#
+# ##########################################################################
+
+CODIGO_LETRAS = {
+    "A": "A- -B AB",      "J": "AB AB A-",      "R": "-B A- -B",
+    "B": "A- -B -B",      "K": "AB AB AB",      "S": "A- AB -B",
+    "C": "AB A- AB",      "L": "AB A- -B",      "T": "AB -B A-",
+    "D": "-B AB -B",      "M": "A- A- -B",      "U": "AB -B AB",
+    "E": "A- -B A-",      "N": "-B A- AB",      "V": "-B A- A-",
+    "F": "AB A- A-",      "Ñ": "AB AB -B",      "W": "-B -B -B",
+    "G": "A- AB AB",      "O": "A- AB A-",      "X": "A- A- A-",
+    "H": "-B AB AB",      "P": "A- A- AB",      "Y": "-B -B A-",
+    "I": "-B AB A-",      "Q": "-B -B AB",      "Z": "AB -B -B",
+}
+
+# Los recuadros son UN solo destello, por eso son mucho mas baratos que una
+# letra. El tercer estado encendido (AB) queda libre: un destello suelto AB
+# esta reservado y hoy no significa nada.
+CODIGO_RECUADROS = {
+    NEGRO:  "A-",
+    BLANCO: "-B",
+}
+
+# --- lo anterior, ya masticado para el programa ---------------------------
+# Se calcula una sola vez al importar. DESTELLOS traduce celda -> tupla de
+# estados, y CELDA hace el camino de vuelta.
+DESTELLOS = {}
+for _c, _txt in list(CODIGO_LETRAS.items()) + list(CODIGO_RECUADROS.items()):
+    DESTELLOS[_c] = tuple(ESTADO[p] for p in _txt.split())
+CELDA = {v: k for k, v in DESTELLOS.items()}
+
+# Comprobacion de que la tabla esta bien escrita. Salta al importar, no al
+# ejecutar, para que un error de dedo se vea enseguida y no en mitad de la
+# transmision.
+assert set(CODIGO_LETRAS) == set(ALFABETO), "faltan o sobran letras en la tabla"
+assert len(CELDA) == len(DESTELLOS), "hay dos celdas con los mismos destellos"
+assert all(len(d) == 3 for d in map(DESTELLOS.get, ALFABETO)), \
+    "toda letra son 3 destellos"
+assert all(SEP not in d for d in DESTELLOS.values()), \
+    "un destello no puede ser el separador"
+
 
 # ------------------------------------------------------------ unidades ----
 PREAMBULO = [LUZ_A, LUZ_B, LUZ_A, LUZ_B]    # 4 destellos seguidos
@@ -83,7 +152,9 @@ MAX_COLS = 26
 
 
 # ==========================================================================
-#  NÚMEROS  <->  DESTELLOS
+#  NUMEROS  <->  DESTELLOS
+#  Los numeros (indice de fila, cuantas celdas, suma de control) van en base
+#  3 con los tres estados encendidos, igual que las letras.
 # ==========================================================================
 def num_a_simbolos(n):
     """0..26 -> tres destellos en base 3."""
@@ -101,42 +172,38 @@ def simbolos_a_num(destellos):
 
 
 # ==========================================================================
-#  CELDAS  <->  DESTELLOS
+#  CELDAS  <->  DESTELLOS   (aquí solo se consulta la tabla de arriba)
 # ==========================================================================
 def celda_a_simbolos(c):
     """Una celda -> [separador, destello] o [separador, d, d, d]."""
     c = c.upper()
-    if c == NEGRO:
-        return [SEP, DIGITOS[0]]                   # -- A-
-    if c in (BLANCO, " ", ""):
-        return [SEP, DIGITOS[1]]                   # -- -B
-    idx = ALFABETO_MANUAL.find(c)
-    if idx < 0:
+    if c in (" ", ""):
+        c = BLANCO
+    if c not in DESTELLOS:
         raise ValueError("carácter no válido en la celda: %r" % c)
-    return [SEP] + num_a_simbolos(idx)
+    return [SEP] + list(DESTELLOS[c])
 
 
 def simbolos_a_celda(destellos):
     """Los destellos de UNA celda (ya sin el separador) -> el carácter."""
-    if len(destellos) == 1:
-        d = DIGITOS.index(destellos[0])
-        if d == 0:
-            return NEGRO
-        if d == 1:
-            return BLANCO
-        raise ValueError("un solo destello 'AB' está reservado")
-    if len(destellos) == 3:
-        return ALFABETO_MANUAL[simbolos_a_num(destellos)]
-    raise ValueError("una celda son 1 o 3 destellos, llegaron %d" % len(destellos))
+    c = CELDA.get(tuple(destellos))
+    if c is None:
+        raise ValueError("esos %d destellos no son ninguna celda: %s"
+                         % (len(destellos), " ".join(NOMBRE[d] for d in destellos)))
+    return c
 
 
 def valor_celda(c):
-    """Valor numérico de una celda, solo para la suma de control."""
-    if c == NEGRO:
-        return 0
-    if c == BLANCO:
-        return 1
-    return 2 + ALFABETO_MANUAL.index(c.upper())
+    """Valor numérico de una celda, solo para la suma de control.
+
+    Se saca de la propia tabla: los tres destellos leídos como número en base
+    3. Los recuadros, que son un destello, valen 0 y 1. Así, si se cambia la
+    tabla, la suma de control se ajusta sola.
+    """
+    d = DESTELLOS[c.upper() if c not in (NEGRO, BLANCO) else c]
+    if len(d) == 1:
+        return DIGITOS.index(d[0])
+    return 2 + simbolos_a_num(list(d))
 
 
 def suma_control(celdas):
@@ -183,6 +250,17 @@ def bloque(grid):
     return unidades
 
 
+def aviso():
+    """El AVISO: las dos luces parpadeando rápido, sin datos.
+
+    Quiere decir "prepárense, voy a transmitir". Va a AVISO_T_S por destello,
+    mucho más rápido que un símbolo, así que no se puede confundir con nada
+    del mensaje. Se devuelve como lista de estados; los tiempos los pone quien
+    la emita, con AVISO_T_S.
+    """
+    return [AMBAS, SEP] * AVISO_DESTELLOS
+
+
 # ==========================================================================
 #  EL MINI PARPADEO
 # ==========================================================================
@@ -221,7 +299,7 @@ def segmentar(simbolos):
     """Corta una secuencia larga en unidades sueltas (cabecera, filas...).
 
     Se apoya en el preámbulo: una racha de 4 o más destellos seguidos solo
-    puede ser el arranque de una unidad nueva (ver nota 3 arriba).
+    puede ser el arranque de una unidad nueva.
     """
     unidades, inicio, i = [], 0, 0
     while i < len(simbolos):
@@ -353,9 +431,9 @@ def tabla_letras(orden_alfabetico=True):
     en algún punto la luz se corta un instante y vuelve igual.
     """
     filas = []
-    for i, L in enumerate(ALFABETO_MANUAL):
-        d = [i // 9, (i // 3) % 3, i % 3]
-        filas.append((L, [NOMBRE[x] for x in num_a_simbolos(i)],
+    for L in CODIGO_LETRAS:
+        d = DESTELLOS[L]
+        filas.append((L, [NOMBRE[x] for x in d],
                       d[0] == d[1] or d[1] == d[2]))
     if orden_alfabetico:
         filas.sort(key=lambda f: ALFABETO.index(f[0]))
@@ -389,6 +467,8 @@ if __name__ == "__main__":
     print("PREÁMBULO      %s   arranque de cabecera o fila" % a_texto(PREAMBULO))
     print("PARPADEO       si la luz vuelve igual, se corta 1/%d de tiempo antes"
           % SUBRANURAS)
+    print("AVISO          %d parpadeos de las dos luces a %.2f s"
+          % (AVISO_DESTELLOS, AVISO_T_S))
 
     grid = [["S", "I"], [NEGRO, BLANCO]]
     print("\nEJEMPLO  cuadrícula 2x2 = [['S','I'], ['#','_']]\n")
@@ -407,13 +487,17 @@ if __name__ == "__main__":
             leidas[info["indice"]] = info["celdas"]
     assert leidas == {0: ["S", "I"], 1: [NEGRO, BLANCO]}, leidas
 
+    # toda celda de la tabla codifica y decodifica bien
+    for c in list(ALFABETO) + [NEGRO, BLANCO]:
+        assert simbolos_a_celda(celda_a_simbolos(c)[1:]) == c, c
+
     # El parpadeo no cambia el mensaje: solo parte los símbolos en ranuras.
     for _, sim in bloque(grid):
         ranuras = emision(sim)
         assert len(ranuras) == len(sim) * SUBRANURAS
-        # al colapsar cada grupo de ranuras se recupera el símbolo original
         for k, s in enumerate(sim):
             trozo = ranuras[k * SUBRANURAS:(k + 1) * SUBRANURAS]
             assert trozo[-1] == s, (k, trozo, s)
+
     print("codigo_manual.py OK  ·  %.0f s para este bloque a %.1f s/símbolo"
           % (duracion(bloque(grid)), T_SIMBOLO_S))

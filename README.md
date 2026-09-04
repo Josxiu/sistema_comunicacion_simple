@@ -27,8 +27,8 @@ memorizar nada.
 ## Archivos
 
 Están todos en la carpeta [`manual/`](manual/). Los tres `.py` van juntos en la
-misma carpeta y se abren con el **botón de play de VS Code**. No llevan
-argumentos.
+misma carpeta y se abren con el **botón de play de
+VS Code**. No llevan argumentos.
 
 | archivo | qué es |
 |---|---|
@@ -39,6 +39,12 @@ argumentos.
 
 Solo hace falta Python con Tkinter, que viene de fábrica. `pyserial` únicamente
 si se usa el Arduino.
+
+**Para cambiar algo hay dos sitios y solo dos**, los dos al principio de
+`codigo_manual.py`: el bloque `PARAMETROS` (velocidad, duración del parpadeo,
+pausa entre filas, tiempos del aviso) y el bloque `TABLA DEL CODIGO` (qué
+destellos es cada letra y cada recuadro). Los otros dos programas leen de ahí,
+así que no hay nada que tocar por duplicado.
 
 ---
 
@@ -74,16 +80,81 @@ habría que contar cuánto duró. Con eso, para el receptor la regla es: *si
 parpadea y vuelve igual, pulsa la misma tecla otra vez*. No se confunde con el
 separador, que es un tiempo de oscuridad **entero**.
 
-**Las unidades.** El bloque va en trozos independientes, uno por fila:
+---
+
+## Cómo viaja el mensaje
+
+El bloque **no va de un solo golpe**. Va en trozos independientes que se llaman
+unidades: primero la cabecera, después una unidad por cada fila.
 
 ```
 CABECERA   preámbulo | -- 26 | -- filas | -- columnas | --
 FILA i     preámbulo | -- i  | -- n     | -- celda -- celda ... | -- suma | --
 ```
 
-`26` (`AB AB AB`) marca la cabecera; las filas van de 0 a 25. `n` es cuántas
-celdas trae la fila y `suma` es la suma de sus celdas módulo 27. **Si una fila
-llega mal se repite solo esa fila.**
+Cada `--` de ahí es un tiempo de oscuridad, y cada número son tres destellos.
+
+### La cabecera
+
+Va primero y solo dice **de qué tamaño es el bloque**. Sus tres grupos son:
+
+1. **`26`** (`AB AB AB`). Es un número reservado: las filas van de 0 a 25, así
+   que el 26 no puede ser el índice de ninguna fila. Al receptor le sirve para
+   distinguir "esto es la cabecera" de "esto es la fila número tal", sin
+   necesidad de ninguna marca aparte.
+2. **filas**, de 1 a 26.
+3. **columnas**, de 1 a 26.
+
+En cuanto llega, el receptor ya dibuja la cuadrícula vacía y sabe cuántas filas
+tiene que esperar. Por eso va primero.
+
+### Una fila
+
+1. **índice** (0, 1, 2...). Dice *qué* fila es. Gracias a esto las filas pueden
+   llegar en cualquier orden y se pueden repetir sueltas.
+2. **n**, cuántas celdas trae. Es lo que le dice al receptor **dónde termina la
+   fila**: cuenta n celdas y lo siguiente ya es la suma de control. Sin este
+   número no sabría si la fila se acabó o si todavía falta una celda.
+3. **las n celdas**, cada una precedida de su `--`.
+4. **la suma de control**.
+
+### La suma de control
+
+Es la comprobación de que la fila llegó bien. Se hace así:
+
+* cada celda vale un número — `#` vale 0, `_` vale 1, y una letra vale
+  2 + su número de tres destellos;
+* se suman los valores de todas las celdas de la fila;
+* se toma el **resto de dividir entre 27**, que da un número de 0 a 26, o sea
+  que cabe justo en tres destellos.
+
+El transmisor la calcula y la manda al final de la fila; el receptor calcula la
+suya con lo que recibió y las compara. Si no coinciden, esa fila llegó mal y se
+marca en rojo. No corrige el error, solo lo detecta — pero es lo que hace
+falta, porque **basta con pedir que repitan esa fila**.
+
+Que sea módulo 27 no es casualidad: es el mismo rango que un grupo de tres
+destellos, así que la suma se manda con el mismo mecanismo que todo lo demás.
+
+### Cómo se sabe que una fila terminó
+
+Por dos caminos a la vez, y ese es el punto:
+
+* **por el contenido**: la fila dijo `n`, así que después de n celdas viene la
+  suma y se acabó;
+* **por la forma**: la unidad siguiente empieza con el preámbulo, cuatro
+  destellos seguidos, que dentro de los datos es imposible.
+
+Si se pierde algún símbolo y la cuenta de `n` se descuadra, el preámbulo
+rescata la sincronización: el receptor sabe que empieza algo nuevo aunque lo
+anterior quedara a medias. Se pierde esa fila, no el resto del mensaje.
+
+### El aviso
+
+Antes de empezar se manda el **aviso**: las dos luces parpadeando rápido, seis
+veces. No lleva datos, solo quiere decir *prepárate, voy a transmitir*. Va
+mucho más rápido que un símbolo, así que no se confunde con el mensaje. En el
+transmisor es la tecla `*`.
 
 ---
 
@@ -138,8 +209,16 @@ solo destello cada uno.
 **Transmisor.** Arranca en modo **EDITAR**: `.` o espacio o `#` = negro,
 `-` o `_` = blanco, letras `A..Z Ñ`. El tamaño se cambia con **+** y **−** sin
 borrar lo escrito, y `Ctrl+Z` deshace. **F5** pasa a **TRANSMITIR**: se elige
-una unidad a la derecha y **espacio** la reproduce; las dos bolas grandes van
-diciendo qué prender.
+una unidad a la derecha y **espacio** la reproduce (y la para); las dos bolas
+grandes van diciendo qué prender.
+
+En cualquiera de los dos modos, estas teclas mandan sobre las luces **sin
+transmitir nada**, para apuntarlas y comprobar el cableado. Son las **mismas
+teclas del receptor**, para que los dos lados hablen igual:
+
+```
+1 = solo ROJA     2 = solo VERDE     3 = LAS DOS     0 = NINGUNA     * = AVISO
+```
 
 **Receptor.** Se pulsa la tecla del estado que se ve, cada vez que las luces
 cambian:
@@ -165,6 +244,12 @@ sale como un toque rápido y no siempre igual de corto).
 resistencia de 220 Ω; para 110 V hace falta un módulo de relé. Se elige el
 puerto en la ventana del transmisor y se pulsa **Conectar**
 (`python -m pip install pyserial`).
+
+El PC le manda la fila **entera** de una vez y la placa se queda emitiéndola
+varios segundos, así que para poder pararla a medias el firmware atiende una
+orden de corte entre símbolo y símbolo. Si se usa una versión vieja del sketch,
+darle a PARAR detiene la pantalla pero las luces siguen hasta el final de la
+fila: hay que **volver a subir** `relaylink.ino` (v3.1 o posterior).
 
 ---
 

@@ -4,8 +4,14 @@
 Dos modos, se cambian con F5:
   EDITAR       se escribe la cuadricula.  . espacio # = negro   - _ = blanco
                letras A..Z N   flechas   ENTER = fila siguiente   Ctrl+Z
-  TRANSMITIR   se elige una unidad a la derecha y ESPACIO la reproduce; las
-               dos bolas grandes van diciendo, simbolo a simbolo, que prender
+  TRANSMITIR   se elige una unidad a la derecha y ESPACIO la reproduce (y la
+               para); las dos bolas grandes van diciendo, simbolo a simbolo,
+               que prender
+
+En cualquiera de los dos modos, 1 2 3 0 prenden y apagan las luces A MANO, sin
+transmitir nada: sirve para apuntarlas y para comprobar el cableado. Son las
+MISMAS teclas que usa el receptor para apuntar lo que ve. El * manda el AVISO,
+un parpadeo rapido de las dos que quiere decir "preparate, voy a transmitir".
 
 El ARDUINO ES OPCIONAL, y opcional quiere decir que el programa hace lo mismo
 sin el: la diferencia es quien mueve el interruptor. Sin Arduino lo mueve una
@@ -39,6 +45,18 @@ ROJO = "#ff6b6b"
 AZUL = "#9fd0ff"
 
 MAX_CELDAS = 80          # el máximo que pide el enunciado
+
+# Las cuatro teclas del control manual de las luces son LAS MISMAS que usa el
+# receptor para apuntar lo que ve. Así los dos lados hablan igual: el del
+# transmisor pulsa 2 y prende la verde, el del receptor ve verde y pulsa 2.
+#   (estado, tecla, rótulo, color)
+LUCES = [
+    (M.LUZ_A, "1", "solo ROJA", "#ff3b30"),
+    (M.LUZ_B, "2", "solo VERDE", "#34c759"),
+    (M.AMBAS, "3", "LAS DOS", "#ffd54f"),
+    (M.SEP,   "0", "NINGUNA", "#555555"),
+]
+TECLA_AVISO = "asterisk"        # la tecla *
 
 
 # =========================================================================
@@ -85,13 +103,34 @@ class Arduino(object):
         dividido entre SUBRANURAS para que el mini parpadeo le quepa."""
         self.ser.write(b"S:%d\n" % int(segundos_por_simbolo * 1e6 / M.SUBRANURAS))
 
+    def periodo_us(self, us):
+        """Período de ranura directo, en microsegundos. Lo usa el aviso,
+        que va mucho más rápido que un símbolo."""
+        self.ser.write(b"S:%d\n" % int(us))
+
     def emitir(self, ranuras):
         ranuras = ranuras[:self.MAX_RANURAS]
         self.ser.write(b"X:%d:%s\n" % (len(ranuras),
                                        _empaquetar(ranuras).encode()))
 
+    def cortar(self):
+        """Aborta la emisión que la placa esté haciendo ahora mismo.
+
+        Hace falta porque emitir() le manda al Arduino la unidad ENTERA de
+        un golpe y la placa se queda ocupada varios segundos emitiéndola:
+        sin esto, darle a PARAR solo detenía la animación de la pantalla y
+        las luces seguían solas hasta el final. El firmware mira si llega
+        una 'Z' entre símbolo y símbolo, así que el corte tarda como mucho
+        una ranura.
+        """
+        self.ser.write(b"Z\n")
+
+    def fijar(self, estado):
+        """Deja las luces en uno de los 4 estados, sin transmitir nada."""
+        self.ser.write(b"B:%d\n" % (estado & 3))
+
     def apagar(self):
-        self.ser.write(b"B:0\n")
+        self.fijar(M.SEP)
 
     def leer(self):
         """Las líneas que haya mandado el Arduino, si hay alguna."""
@@ -137,6 +176,7 @@ class TxManual(object):
         self.i = 0                      # símbolo dentro de la unidad
         self.fase = 0                   # 1 = pintando el mini parpadeo
         self.corriendo = False
+        self.luz_fija = None            # estado puesto a mano, o None
         self.periodo = M.T_SIMBOLO_S
         self.arduino = None
         self._job = None
@@ -238,9 +278,24 @@ class TxManual(object):
         bajo = tk.Frame(self.root, bg=FONDO)
         bajo.pack(fill="x", padx=8, pady=(4, 8))
 
-        self.luces = tk.Canvas(bajo, width=330, height=150, bg=FONDO,
+        izq = tk.Frame(bajo, bg=FONDO)
+        izq.pack(side="left")
+        self.luces = tk.Canvas(izq, width=330, height=150, bg=FONDO,
                                highlightthickness=0)
-        self.luces.pack(side="left")
+        self.luces.pack()
+
+        # Prender y apagar las luces SIN transmitir nada: para apuntarlas, para
+        # comprobar que el cableado responde y para avisar al receptor.
+        manual = tk.Frame(izq, bg=FONDO)
+        manual.pack(pady=(4, 0))
+        for estado, tecla, nombre, color in LUCES:
+            tk.Button(manual, text="%s\n%s" % (tecla, nombre), bg=color,
+                      fg="#dddddd" if estado == M.SEP else "#000000",
+                      font=("Segoe UI", 9, "bold"), width=8,
+                      command=lambda e=estado: self.luz_manual(e)).pack(side="left", padx=2)
+        tk.Button(manual, text="*\nAVISO", bg="#e0a020", fg="black",
+                  font=("Segoe UI", 9, "bold"), width=8,
+                  command=self.avisar).pack(side="left", padx=(10, 0))
 
         der = tk.Frame(bajo, bg=FONDO)
         der.pack(side="left", fill="both", expand=True, padx=10)
@@ -270,6 +325,11 @@ class TxManual(object):
                   command=self.repetir).pack(side="left", padx=8)
 
         # ---- teclado ----
+        # Las teclas de las luces van por su cuenta y devuelven "break" para
+        # que no lleguen también a on_key.
+        for _, tecla, _, _ in LUCES:
+            self.root.bind(tecla, self._tecla_luz)
+        self.root.bind("<asterisk>", self._tecla_luz)
         self.root.bind("<Key>", self.on_key)
         self.root.bind("<F5>", lambda e: self.cambiar_modo())
         self.root.bind("<Escape>", lambda e: self.foco_cuadricula())
@@ -406,7 +466,7 @@ class TxManual(object):
             self._guardar_undo()
             self.grid[self.cur[0]][self.cur[1]] = M.NEGRO
             self._mover((0, 1))
-        elif ch in ("-", "_", "0"):
+        elif ch in ("-", "_"):          # el 0 ya no: es la tecla de apagar
             self._guardar_undo()
             self.grid[self.cur[0]][self.cur[1]] = M.BLANCO
             self._mover((0, 1))
@@ -438,6 +498,22 @@ class TxManual(object):
         elif ev.keysym == "Left":
             self.atras()
 
+    def _tecla_luz(self, ev):
+        """1/2/3/0 y * mandan sobre las luces en cualquiera de los dos modos.
+
+        No chocan con nada: en la cuadrícula esos caracteres no son celdas
+        válidas (una celda es una letra, # o _), así que estaban libres.
+        """
+        if self._foco_en_texto():
+            return
+        if ev.keysym == TECLA_AVISO:
+            self.avisar()
+            return "break"
+        for estado, tecla, _, _ in LUCES:
+            if ev.char == tecla:
+                self.luz_manual(estado)
+                return "break"
+
     def _click_celda(self, ev):
         self.canvas.focus_set()            # el clic recupera el teclado
         if self.modo == "editar" and self.geom:
@@ -449,8 +525,7 @@ class TxManual(object):
 
     # -------------------------------------------------------------- modos --
     def cambiar_modo(self):
-        self.corriendo = False
-        self.fase = 0
+        self.parar()
         self.modo = "transmitir" if self.modo == "editar" else "editar"
         if self.modo == "transmitir":
             self._regenerar()
@@ -485,9 +560,63 @@ class TxManual(object):
         if self.arduino:
             self.arduino.velocidad(self.periodo)
 
+    # -------------------------------------------- control manual de luces --
+    def luz_manual(self, estado):
+        """Prende o apaga las luces a mano, sin transmitir nada.
+
+        Tomar el control manual PARA la reproducción: si no, la animación
+        seguiría pisando el estado que se acaba de poner.
+        """
+        self.parar()
+        self.luz_fija = estado
+        if self.arduino:
+            self.arduino.fijar(estado)
+        self.refrescar()
+
+    def avisar(self):
+        """AVISO: las dos luces parpadeando rápido, para decirle al receptor
+        'prepárate, voy a transmitir'. Va a AVISO_T_S por destello, mucho más
+        rápido que un símbolo, así que no se puede confundir con datos."""
+        self.parar()
+        patron = M.aviso()
+        if self.arduino:
+            # El Arduino emite a ritmo fijo: se le baja el período, se le manda
+            # el patrón y se le devuelve el suyo. Las tres órdenes se procesan
+            # en orden, así que la última no le pisa el aviso.
+            self.arduino.periodo_us(M.AVISO_T_S * 1e6)
+            self.arduino.emitir(patron)
+            self.arduino.velocidad(self.periodo)
+        self._animar_aviso(patron, 0)
+        self.lbl_est.config(text="AVISO enviado · espera a que el receptor "
+                                 "confirme antes de transmitir", fg=AMBAR)
+
+    def _animar_aviso(self, patron, k):
+        """Pinta el aviso en pantalla al mismo ritmo que lo emite la placa,
+        para que quien lo hace a mano lleve el compás."""
+        if k >= len(patron):
+            self.luz_fija = M.SEP
+            self.refrescar()
+            return
+        self.luz_fija = patron[k]
+        self.refrescar()
+        self.root.after(int(M.AVISO_T_S * 1000),
+                        self._animar_aviso, patron, k + 1)
+
+    def parar(self):
+        """Detiene la reproducción AQUÍ Y EN LA PLACA.
+
+        Lo segundo es lo que faltaba: al Arduino se le manda la unidad entera
+        de una vez, así que parar solo la animación dejaba las luces
+        conmutando solas hasta el final de la fila.
+        """
+        self.corriendo = False
+        self.fase = 0
+        if self.arduino:
+            self.arduino.cortar()
+
     # ----------------------------------------------------- reproducción ---
     def elegir(self, j):
-        self.corriendo = False
+        self.parar()
         self.k, self.i, self.fase = j, 0, 0
         if self.modo == "editar":
             self.cambiar_modo()
@@ -495,7 +624,7 @@ class TxManual(object):
             self.refrescar()
 
     def repetir(self):
-        self.corriendo = False
+        self.parar()
         self.i, self.fase = 0, 0
         self.refrescar()
 
@@ -503,23 +632,32 @@ class TxManual(object):
         return self.unidades[self.k][1] if self.unidades else []
 
     def alternar(self):
+        """El botón / la barra espaciadora: arranca si está parado y para si
+        está andando."""
         if not self.unidades:
             return
         if self.modo == "editar":
             self.cambiar_modo()
-        self.corriendo = not self.corriendo
+
         if self.corriendo:
-            if self.t0 is None:
-                self.t0 = time.time()
-            if self.i >= len(self._actual()):
-                self.i = 0
-            # El Arduino recibe la unidad ENTERA de una vez, ya expandida a
-            # ranuras (con los mini parpadeos), y la emite solo; la animación
-            # de la pantalla va en paralelo para acompañarlo.
-            if self.arduino:
-                ranuras = M.emision(self._actual())
-                self.arduino.emitir(ranuras[self.i * M.SUBRANURAS:])
-            self._tic()
+            self.parar()
+            self.refrescar()
+            return
+
+        self.corriendo = True
+        self.luz_fija = None                   # se acabó el control manual
+        if self.t0 is None:
+            self.t0 = time.time()
+        if self.i >= len(self._actual()):
+            self.i = 0
+        # El Arduino recibe la unidad ENTERA de una vez, ya expandida a ranuras
+        # (con los mini parpadeos), y la emite él solo; la animación de la
+        # pantalla va en paralelo para acompañarlo. Por eso parar() tiene que
+        # avisarle: la placa no se entera de que la pantalla se detuvo.
+        if self.arduino:
+            ranuras = M.emision(self._actual())
+            self.arduino.emitir(ranuras[self.i * M.SUBRANURAS:])
+        self._tic()
         self.refrescar()
 
     def _tic(self):
@@ -651,9 +789,19 @@ class TxManual(object):
         cv.delete("all")
         sim = self._actual()
 
+        # Con el control manual puesto mandan las luces fijadas a mano, no la
+        # unidad: eso es justo lo que se está mirando.
+        if self.luz_fija is not None:
+            self._pintar_bolas(cv, self.luz_fija)
+            self.lbl_pos.config(text="control manual   [%s]   (espacio para "
+                                     "volver a transmitir)" % M.NOMBRE[self.luz_fija])
+            self.lbl_sig.config(text="")
+            return
+
         if self.modo == "editar" or not sim:
             cv.create_text(165, 75, fill="#666666", font=("Segoe UI", 11),
-                           text="pulsa TRANSMITIR (F5)")
+                           text="pulsa TRANSMITIR (F5), o usa 1 2 3 0 para "
+                                "probar las luces")
             self.lbl_pos.config(text="")
             self.lbl_sig.config(text="")
             return
@@ -669,19 +817,7 @@ class TxManual(object):
 
         estado = sim[self.i]
         # durante el mini parpadeo las dos luces se pintan apagadas
-        mostrado = M.SEP if self.fase == 1 else estado
-        for cx, nombre, encendida, on, off in (
-                (85, "ROJA (A)", mostrado & 1, "#ff3b30", "#3a1210"),
-                (245, "VERDE (B)", mostrado & 2, "#34c759", "#0f2d17")):
-            cv.create_oval(cx - 55, 10, cx + 55, 120,
-                           fill=on if encendida else off,
-                           outline="#ffffff" if encendida else "#444444",
-                           width=4 if encendida else 1)
-            cv.create_text(cx, 65, text="ON" if encendida else "off",
-                           fill="#000000" if encendida else "#777777",
-                           font=("Segoe UI", 22, "bold"))
-            cv.create_text(cx, 137, text=nombre, fill="#cccccc",
-                           font=("Segoe UI", 10, "bold"))
+        self._pintar_bolas(cv, M.SEP if self.fase == 1 else estado)
 
         if self.fase == 1:
             etiqueta = "MINI PARPADEO -> vuelve la misma luz"
@@ -697,6 +833,21 @@ class TxManual(object):
         self.lbl_sig.config(text="siguientes:  " + M.a_texto(sim[self.i + 1:self.i + 12]))
         self.btn_play.config(text="PARAR (espacio)" if self.corriendo
                              else "INICIAR (espacio)")
+
+    def _pintar_bolas(self, cv, estado):
+        """Las dos bolas grandes, en el estado que se le pase."""
+        for cx, nombre, encendida, on, off in (
+                (85, "ROJA (A)", estado & 1, "#ff3b30", "#3a1210"),
+                (245, "VERDE (B)", estado & 2, "#34c759", "#0f2d17")):
+            cv.create_oval(cx - 55, 10, cx + 55, 120,
+                           fill=on if encendida else off,
+                           outline="#ffffff" if encendida else "#444444",
+                           width=4 if encendida else 1)
+            cv.create_text(cx, 65, text="ON" if encendida else "off",
+                           fill="#000000" if encendida else "#777777",
+                           font=("Segoe UI", 22, "bold"))
+            cv.create_text(cx, 137, text=nombre, fill="#cccccc",
+                           font=("Segoe UI", 10, "bold"))
 
     # -------------------------------------------------------------- bucle --
     def _bucle(self):

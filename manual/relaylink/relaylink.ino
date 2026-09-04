@@ -1,5 +1,5 @@
 /* ===========================================================================
-   relaylink.ino  --  Emisor de DOS LUCES  (v3.0)
+   relaylink.ino  --  Emisor de DOS LUCES  (v3.1)
    Sistema de Comunicacion Simple - Redes de Computadores I - UdeA 2026-2
 
    El Arduino es TONTO a proposito: solo recibe una lista de estados y los
@@ -35,12 +35,17 @@
         X:<nsim>:<HEX>  emitir esa lista de estados (2 bits por simbolo,
                         4 simbolos por byte, el primero en los bits altos)
         S:<us>          periodo de simbolo en microsegundos
-        A               patron de ATENCION: 3 destellos largos de las dos luces
-        B:0 | B:2       las dos luces apagadas / las dos encendidas (montaje)
+        Z               CORTAR la emision en curso ya mismo y apagar
+        B:<0..3>        fijar las luces a mano: 0 ninguna, 1 roja, 2 verde,
+                        3 las dos. Sirve para apuntar y para el aviso.
         P               ping
      Arduino -> PC:
-        OKX <nsim>      lista emitida
-        OKS ...  OKB  OKA  PONG  READY
+        OKX <nsim>      lista emitida entera
+        ABORT <n>       la emision se corto en el simbolo n (llego una Z)
+        OKS ...  OKB  PONG  READY
+
+   La Z es importante: emitir() se queda ocupado varios segundos, asi que sin
+   ella el PC no puede parar una fila una vez empezada. Ver comentario abajo.
    =========================================================================== */
 
 #include <Arduino.h>
@@ -67,35 +72,53 @@ void fijarLuces(uint8_t estado) {
   digitalWrite(PIN_LED, (estado & 1) ? HIGH : LOW);
 }
 
-/* Espera larga con las interrupciones ACTIVAS. delayMicroseconds() no sirve
-   por encima de 16383 us, y micros() solo avanza si el Timer0 puede
-   interrumpir: por eso NO se usa noInterrupts() aqui. */
-void esperarHasta(unsigned long t0, unsigned long objetivo) {
-  while ((unsigned long)(micros() - t0) < objetivo) { }
+/* Devuelve true si llego una orden de CORTAR.
+
+   Se mira con peek(), que espia el siguiente byte sin sacarlo del buffer: si
+   no es una Z se deja donde esta y lo recoge loop() cuando toque. Solo se
+   vacia el buffer cuando SI es una Z, porque entonces todo lo que venga
+   detras es de un mensaje que ya no vamos a emitir. */
+bool cortar() {
+  if (!Serial.available() || Serial.peek() != 'Z') return false;
+  while (Serial.available()) Serial.read();
+  return true;
 }
 
+/* Espera hasta 'objetivo', vigilando el puerto serie por si hay que cortar.
+
+   Se espera con micros() y no con delayMicroseconds() porque este ultimo no
+   sirve por encima de 16383 us, y aqui un simbolo dura hasta segundos. Y las
+   interrupciones se quedan ACTIVAS a proposito: micros() solo avanza si el
+   Timer0 puede interrumpir. */
+void esperarOCortar(unsigned long t0, unsigned long objetivo, bool *corte) {
+  while ((unsigned long)(micros() - t0) < objetivo) {
+    if (cortar()) { *corte = true; return; }
+  }
+}
+
+/* Emite la lista de estados. Es lo unico que tarda de verdad en este sketch:
+   una fila entera a un segundo por simbolo son mas de 20 segundos, y durante
+   ese rato el Arduino no vuelve a loop(). Por eso mira si le mandan una Z
+   entre simbolo y simbolo: sin eso, darle a PARAR en el PC no serviria de
+   nada hasta que la fila terminara sola. */
 void emitir(uint16_t nsim) {
   unsigned long t0 = micros();
-  for (uint16_t i = 0; i < nsim; i++) {
+  bool corte = false;
+  uint16_t i = 0;
+  for (; i < nsim && !corte; i++) {
     uint8_t estado = (bufSim[i >> 2] >> (6 - 2 * (i & 3))) & 0x03;
     fijarLuces(estado);
-    esperarHasta(t0, T_SIMBOLO_US);
+    esperarOCortar(t0, T_SIMBOLO_US, &corte);
     t0 += T_SIMBOLO_US;
   }
   fijarLuces(0);                       // reposo: las dos apagadas
+  if (corte) { Serial.print(F("ABORT ")); Serial.println(i); }
+  else       { Serial.print(F("OKX ")); Serial.println(nsim); }
 }
 
-void patronAtencion() {
-  // Tres destellos largos de las dos luces. Le dice al receptor "preparate";
-  // no se puede confundir con datos porque el codigo de linea nunca repite
-  // un estado y esto sostiene el mismo estado mucho tiempo.
-  for (uint8_t k = 0; k < 3; k++) {
-    fijarLuces(3);
-    delay(400);
-    fijarLuces(0);
-    delay(400);
-  }
-}
+/* El AVISO ya no esta cableado aqui: lo manda el PC como una lista de
+   estados normal, a la velocidad que diga AVISO_T_S en codigo_manual.py. Asi
+   los tiempos se cambian sin volver a programar la placa. */
 
 uint8_t hexVal(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -123,8 +146,7 @@ void procesarLinea() {
     uint16_t nby = (nsim + 3) / 4;
     for (uint16_t i = 0; i < nby; i++)
       bufSim[i] = (hexVal(hx[2 * i]) << 4) | hexVal(hx[2 * i + 1]);
-    emitir(nsim);
-    Serial.print(F("OKX ")); Serial.println(nsim);
+    emitir(nsim);                      // emitir() ya responde OKX o ABORT
     return;
   }
 
@@ -134,11 +156,14 @@ void procesarLinea() {
     return;
   }
 
-  if (linea[0] == 'A') { patronAtencion(); Serial.println(F("OKA")); return; }
+  // Una Z suelta (fuera de una emision) solo apaga: no hay nada que cortar.
+  if (linea[0] == 'Z') { fijarLuces(0); Serial.println(F("ABORT 0")); return; }
 
   if (linea[0] == 'B' && linea[1] == ':') {
-    fijarLuces(linea[2] == '2' ? 3 : 0);
-    Serial.println(F("OKB"));
+    uint8_t e = linea[2] - '0';
+    if (e > 3) e = 0;
+    fijarLuces(e);
+    Serial.print(F("OKB ")); Serial.println(e);
     return;
   }
 
@@ -152,7 +177,7 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   fijarLuces(0);
   Serial.begin(115200);
-  Serial.print(F("READY luces2 v3.0 T_SIMBOLO_US=")); Serial.println(T_SIMBOLO_US);
+  Serial.print(F("READY luces2 v3.1 T_SIMBOLO_US=")); Serial.println(T_SIMBOLO_US);
 }
 
 void loop() {
