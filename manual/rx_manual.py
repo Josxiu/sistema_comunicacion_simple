@@ -14,6 +14,11 @@ El programa va armando el bloque y marca cada fila como ok, con error o que
 falta: eso es exactamente lo que hay que pedir que repitan. Si se pierde un
 simbolo, la siguiente oscuridad vuelve a sincronizar y solo se dana una celda.
 
+Equivocarse no arruina lo anterior. Las teclas sueltas o al azar se descartan
+solas, y basta con que la fila llegue otra vez entera y bien para que quede
+bien: una fila que ya paso su suma de control NO se pisa con una peor. Ademas
+RETROCESO deshace el ultimo simbolo y SUPR lo borra todo.
+
 La caja de pegar sirve para practicar sin luces: se pega lo que copia
 tx_manual.py. La codificacion esta en codigo_manual.py.
 """
@@ -186,9 +191,7 @@ class RxManual(object):
                 self.filas, self.cols = info["filas"], info["cols"]
             elif info["tipo"] == "fila":
                 if info["completa"]:
-                    self.recibidas[info["indice"]] = {
-                        "celdas": info["celdas"],
-                        "ok": bool(info["control_ok"])}
+                    self._guardar_fila(info)
                     self.parcial = None
                 else:
                     self.parcial = (info["indice"], info["celdas"])
@@ -196,6 +199,20 @@ class RxManual(object):
         self._texto_estado()
         self._tira_filas()
         self.dibujar()
+
+    def _guardar_fila(self, info):
+        """Guarda una fila, pero UNA BUENA NO SE PISA CON UNA MALA.
+
+        La misma fila puede llegar varias veces: porque se pidió repetir, o
+        porque unas teclas sueltas se juntaron y parecieron una fila. Sin esta
+        regla, una fila que ya estaba bien se perdía en cuanto llegaba encima
+        cualquier basura con ese mismo índice.
+        """
+        nueva = {"celdas": info["celdas"], "ok": bool(info["control_ok"])}
+        vieja = self.recibidas.get(info["indice"])
+        if vieja is not None and vieja["ok"] and not nueva["ok"]:
+            return                       # ya la teníamos bien: se queda
+        self.recibidas[info["indice"]] = nueva
 
     # -------------------------------------------------------------- estado --
     def _texto_estado(self):

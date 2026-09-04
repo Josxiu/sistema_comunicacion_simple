@@ -176,7 +176,9 @@ class TxManual(object):
         self.i = 0                      # símbolo dentro de la unidad
         self.fase = 0                   # 1 = pintando el mini parpadeo
         self.corriendo = False
-        self.luz_fija = None            # estado puesto a mano, o None
+        self.luz_fija = None            # lo que se ve ahora, o None
+        self.luz_pedida = None          # lo último que se pidió a mano
+        self._job_parpadeo = None       # parpadeo manual pendiente
         self.periodo = M.T_SIMBOLO_S
         self.arduino = None
         self._job = None
@@ -566,11 +568,55 @@ class TxManual(object):
 
         Tomar el control manual PARA la reproducción: si no, la animación
         seguiría pisando el estado que se acaba de poner.
+
+        Si se vuelve a pulsar el estado que YA está puesto, no se queda igual:
+        hace el MINI PARPADEO. Eso es justo lo que hace falta para mandar dos
+        símbolos iguales seguidos, que si no se verían como uno solo largo.
         """
         self.parar()
+        # Un parpadeo a medias se cancela: si no, al pulsar rápido dos veces se
+        # solaparían y la luz podría no llegar a apagarse entre medias.
+        if self._job_parpadeo is not None:
+            self.root.after_cancel(self._job_parpadeo)
+            self._job_parpadeo = None
+
+        # Se compara con el estado PEDIDO, no con el que se ve: durante el
+        # parpadeo lo que se ve es "apagado", y sin esta distinción una tercera
+        # pulsación seguida no parpadearía y dos símbolos se fundirían en uno.
+        repetido = (estado == self.luz_pedida and estado != M.SEP)
+        self.luz_pedida = estado
+        if repetido:
+            corto = int(self.periodo * 1000 / M.SUBRANURAS)
+            self._poner_luz(M.SEP)
+            self._job_parpadeo = self.root.after(corto, self._fin_parpadeo, estado)
+        else:
+            self._poner_luz(estado)
+        self._avanzar_a_mano(estado)
+
+    def _fin_parpadeo(self, estado):
+        self._job_parpadeo = None
+        self._poner_luz(estado)
+
+    def _poner_luz(self, estado):
+        """Deja las luces en ese estado, en la pantalla y en la placa."""
         self.luz_fija = estado
         if self.arduino:
             self.arduino.fijar(estado)
+        self.refrescar()
+
+    def _avanzar_a_mano(self, estado):
+        """Si lo que se acaba de pulsar es el símbolo que tocaba, avanza.
+
+        Así se puede transmitir la unidad ENTERA a mano: la lista de la derecha
+        va corriendo sola y siempre se ve cuál es el siguiente. Si se pulsa
+        otra cosa el contador no se mueve, para no perder el sitio por un
+        dedazo.
+        """
+        sim = self._actual()
+        if self.modo == "transmitir" and self.i < len(sim) and sim[self.i] == estado:
+            self.i += 1
+            if self.i >= len(sim):
+                self.enviadas.add(self.k)
         self.refrescar()
 
     def avisar(self):
@@ -645,7 +691,7 @@ class TxManual(object):
             return
 
         self.corriendo = True
-        self.luz_fija = None                   # se acabó el control manual
+        self.luz_fija = self.luz_pedida = None   # se acabó el control manual
         if self.t0 is None:
             self.t0 = time.time()
         if self.i >= len(self._actual()):
@@ -793,9 +839,26 @@ class TxManual(object):
         # unidad: eso es justo lo que se está mirando.
         if self.luz_fija is not None:
             self._pintar_bolas(cv, self.luz_fija)
-            self.lbl_pos.config(text="control manual   [%s]   (espacio para "
-                                     "volver a transmitir)" % M.NOMBRE[self.luz_fija])
-            self.lbl_sig.config(text="")
+            # La secuencia se sigue viendo: es lo que permite mandar la unidad
+            # entera a mano, leyendo lo que falta mientras se pulsan las teclas.
+            if self.modo == "transmitir" and sim:
+                if self.i >= len(sim):
+                    self.lbl_pos.config(
+                        text="a mano  [%s]   ·   %s: unidad completa"
+                             % (M.NOMBRE[self.luz_fija], self.unidades[self.k][0]))
+                    self.lbl_sig.config(text="elige la siguiente unidad a la derecha")
+                else:
+                    self.lbl_pos.config(
+                        text="a mano  [%s]   ·   %s: toca el símbolo %d/%d  ->  [%s]"
+                             % (M.NOMBRE[self.luz_fija], self.unidades[self.k][0],
+                                self.i + 1, len(sim), M.NOMBRE[sim[self.i]]))
+                    self.lbl_sig.config(text="siguientes:  "
+                                             + M.a_texto(sim[self.i:self.i + 12]))
+            else:
+                self.lbl_pos.config(text="control manual   [%s]   (F5 y espacio "
+                                         "para transmitir solo)"
+                                         % M.NOMBRE[self.luz_fija])
+                self.lbl_sig.config(text="")
             return
 
         if self.modo == "editar" or not sim:

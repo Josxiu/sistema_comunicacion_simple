@@ -213,12 +213,22 @@ una unidad a la derecha y **espacio** la reproduce (y la para); las dos bolas
 grandes van diciendo qué prender.
 
 En cualquiera de los dos modos, estas teclas mandan sobre las luces **sin
-transmitir nada**, para apuntarlas y comprobar el cableado. Son las **mismas
-teclas del receptor**, para que los dos lados hablen igual:
+transmitir nada**. Son las **mismas teclas del receptor**, para que los dos
+lados hablen igual:
 
 ```
 1 = solo ROJA     2 = solo VERDE     3 = LAS DOS     0 = NINGUNA     * = AVISO
 ```
+
+Sirven para apuntar las luces y comprobar el cableado, pero también para
+**transmitir del todo a mano**: mientras se usan, la secuencia de la unidad
+elegida se sigue viendo al lado y va avanzando sola cada vez que se pulsa el
+símbolo que toca. Si se pulsa otra cosa el contador no se mueve, para no perder
+el sitio por un dedazo.
+
+Y si se vuelve a pulsar la tecla del estado que **ya está puesto**, la luz no se
+queda igual: hace el **mini parpadeo**. Es justo lo que hace falta para mandar
+dos símbolos iguales seguidos.
 
 **Receptor.** Se pulsa la tecla del estado que se ve, cada vez que las luces
 cambian:
@@ -228,8 +238,27 @@ cambian:
 ```
 
 Más la regla del parpadeo: si se corta un instante y vuelve igual, la misma
-tecla otra vez. La tira de arriba dice qué fila llegó **ok**, cuál con **error**
-y cuál **falta**: eso es lo que hay que pedir que repitan.
+tecla otra vez.
+
+La tira de arriba dice, fila por fila, cómo va la cosa: **verde `ok`**,
+**ámbar `error`** (la suma de control no cuadró) o **rojo `falta`**. La fila con
+error se marca además con un recuadro ámbar en la cuadrícula. Eso es exactamente
+lo que hay que pedir que repitan.
+
+**Equivocarse no arruina lo anterior.** No hace falta ningún botón de "repetir
+fila": basta con que la fila llegue otra vez entera y bien.
+
+* Las teclas sueltas o al azar **se descartan solas**. El preámbulo corta por
+  donde toca y el campo `n` dice dónde acaba cada fila, así que lo que sobra se
+  ignora.
+* Una fila que ya pasó su suma de control **no se pisa con una peor**, aunque
+  después llegue basura con ese mismo índice.
+* Una fila que llegó con error **sí** se reemplaza en cuanto llega bien.
+* Y siempre están `RETROCESO` (deshace el último símbolo) y `SUPR` (borra todo).
+
+Lo único que el receptor no puede hacer es *pedirlo él*: no hay canal de vuelta,
+se pide de viva voz o con una linterna. Por eso lo importante es que la pantalla
+diga con claridad qué fila pedir.
 
 **Para practicar sin luces:** en el transmisor, *copiar bloque entero*; en el
 receptor, pegarlo en la caja y darle a *reproducir*.
