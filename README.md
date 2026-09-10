@@ -292,7 +292,8 @@ con un celular y descifrarla después, o para escuchar en vivo.
 | archivo | qué es |
 |---|---|
 | `camara/tx_camara.py` | **Transmisor.** Se digita la cuadrícula y las luces la emiten. |
-| `camara/rx_camara.py` | **Receptor.** Un solo archivo: no necesita ningún otro. |
+| `camara/rx_camara.py` | **Receptor.** Un solo archivo: no necesita ningún otro. Supone la **cámara quieta** (apoyada, trípode, en el borde de una mesa). |
+| `camara/rx_camara_con_seguimiento.py` | El mismo receptor para tomas **a pulso**: sigue las luces cuadro a cuadro. Tarda bastante más, así que solo si la cámara se mueve. |
 
 El firmware del Arduino es **el mismo del modo manual**
 ([`manual/relaylink/relaylink.ino`](manual/relaylink/relaylink.ino)), sin
@@ -346,15 +347,51 @@ Necesita dos librerías:
 python -m pip install numpy opencv-python
 ```
 
+Funciona igual en **Windows, macOS y Linux**: los backends de cámara se
+eligen según el sistema.
+
 Para comprobar que la codificación quedó bien, sin cámara ni video:
 
 ```
 python rx_camara.py --autoprueba
 ```
 
+Y para comprobar **la parte que mira la imagen**, que es donde están los
+parámetros que uno toca — fabrica un video de prueba y lo descifra, con las
+luces separadas y con las luces fundidas:
+
+```
+python rx_camara.py --autoprueba --autoprueba-pdi
+```
+
+Es la red de seguridad: si se cambia un umbral, esto dice en medio minuto si
+se rompió algo.
+
+### Lo que se puede escribir en la línea de comandos
+
+| | |
+|---|---|
+| `--video "toma.mp4"` | descifra ese archivo |
+| `--camara 1` · `--camara "iriun"` | escucha en vivo (número, parte del nombre, o una URL) |
+| `--camaras` | lista las cámaras que responden |
+| `--simular-vivo "toma.mp4"` | pasa un video grabado por el camino de la cámara en vivo |
+| `--zona 860,520,140,90` | dónde buscar las luces, sin marcarlo con el mouse |
+| `--sin-zona` | no preguntar: buscar en todo el cuadro |
+| `--banco "carpeta"` | descifra **todos** los videos de una carpeta y saca una tabla |
+| `--simbolos 7` | forzar la velocidad en vez de medirla |
+| `--guardar bloque.png` | guarda el bloque recibido |
+
+El **banco** es lo que sirve para saber si un cambio mejora de verdad: se
+corre antes y después de tocar un parámetro y se comparan las dos tablas.
+
+```
+python rx_camara.py --banco "mis videos" > resultados.txt
+```
+
 **Todo lo ajustable está junto**, en el bloque `PARAMETROS` del principio del
-archivo: cómo están puestas las luces, la velocidad, la cámara, la exposición.
-No hay que bajar al código para cambiar nada de eso.
+archivo: cómo están puestas las luces, la velocidad, la cámara, la exposición,
+los umbrales, y la lupa de la ventana en vivo. No hay que bajar al código para
+cambiar nada de eso.
 
 ## Las dos luces: por color o por posición
 
@@ -373,9 +410,36 @@ Comprobado con videos de prueba generados a propósito:
 | **dos colores** | ✅ por color | ✅ por posición |
 | **mismo color** | ❌ imposible | ✅ por posición |
 
-`MODO_LUCES = "auto"` (el de fábrica) prueba las dos y se queda con la que dé
-CRC válido. Cuando no engancha porque las luces están fundidas y son del mismo
-color, lo dice con esas palabras en vez de dejarte adivinando.
+El receptor prueba las tres formas de leerlas, en este orden, y se queda con
+la primera que dé CRC válido:
+
+| | mide | cuándo manda |
+|---|---|---|
+| **quemados** | cuántos píxeles tiene **saturados** cada luz | **de día.** Con la escena iluminada el LED nunca se ve oscuro (223 a 251 al aire libre), así que el nivel no distingue nada; lo que desaparece al apagarse no es el nivel sino el **área** |
+| **brillo** | la luminancia de cada luz | de noche, o tan lejos que el LED no llega a saturar |
+| **color** | el croma del par | la **única** que sirve si se funden en un punto |
+
+### Cuánta separación hace falta
+
+Para que se vean como dos puntos y no como uno hacen falta unos **14 px** en
+el cuadro original. Con un celular a 1080p y zoom 1×:
+
+```
+separación_en_px  ≈  1500 × (separación_de_las_luces_en_m) / (distancia_en_m)
+```
+
+O sea, **un centímetro de separación por cada metro de distancia** para llegar
+al mínimo, y el doble para ir cómodo. A 40 m eso son 40 cm entre los dos LED
+como mínimo, y mejor cerca de un metro. Por debajo de eso se funden y solo
+queda el modo por color.
+
+### Si se va a usar el modo por color
+
+Los dos LED tienen que verse **igual de brillantes** en la cámara, no solo de
+colores distintos. Si uno alumbra más, el estado "las dos encendidas" se corre
+hacia el brillante en vez de caer en el medio. El receptor lo aguanta —coloca
+las fronteras donde de verdad están las muestras, no en tercios fijos— pero
+cuanto más parejos, más margen hay. Se ajusta con las resistencias.
 
 ## La codificación
 
@@ -432,25 +496,62 @@ ambiente: lo que manda es la tasa de cuadros.
 
 ## Cómo encuentra las luces
 
-Busca lo que **parpadea**, no lo más brillante: se calcula la desviación
-estándar temporal de cada píxel, y el fondo (paredes, faroles, el cielo) sale
-plano. Pero quedarse solo con el máximo falla cuando la luz está cerca y
-satura, porque su núcleo se clava en 255 y su varianza baja — en unas pruebas
-ganaba siempre la pantalla de un computador del fondo. Por eso se generan
-**varios recuadros candidatos** (por varianza, por brillo, y por el producto de
-los dos) y se prueban en orden hasta que uno dé CRC válido.
+**No hay ningún detector de objetos.** El programa no reconoce la caja, ni el
+poste, ni la ventana: busca **dos puntos** que cumplan cuatro cosas a la vez.
 
-Y las dos luces **no se separan por posición**: a 300 m dos luces separadas
-20 cm caen en unos 2 píxeles y se funden. Se separan por color, midiendo dentro
-del recuadro:
+**1. Que parpadeen al ritmo que toca.** Se calcula la transformada de Fourier
+de cada píxel a lo largo de 90 cuadros y se mira la amplitud entre **2 y
+25 Hz**. Un LED va a 5–12 Hz; una persona caminando, por debajo de 2 Hz. Lo
+que además tenga mucha energía lenta —la firma del que camina— se castiga.
+
+**2. Que alumbren.** El mapa se multiplica por el **brillo al cuadrado**: el
+LED satura y el resto de la escena no.
+
+> Antes se usaba la desviación estándar temporal, y al aire libre no servía:
+> ganaba siempre la gente que pasaba, que ocupa muchísima más imagen que un
+> LED de 5 px. Con el ritmo y el brillo juntos, la luz sale primera.
+
+**3. Que estén a una distancia razonable** el uno del otro (entre 14 y 520 px,
+`SEPARACION_LUCES_PX`).
+
+**4. Que lleven señales DISTINTAS.** Las luces salen también reflejadas —en un
+vidrio, en el piso— y el reflejo parpadea igual de fuerte y al mismo ritmo. Un
+reflejo coincide con su luz el 100 % del tiempo; las dos luces de verdad
+difieren en un tercio de los cuadros. Sin este filtro, la pareja ganadora era
+"una luz y su propio reflejo", que no dice nada.
+
+Y por encima de todo eso manda la **constancia**: se catan varios tramos del
+video y se ordena por en cuántos apareció cada pareja. Las hojas de un árbol
+parpadean a 9 o 10 Hz igual que las luces, pero la pareja buena vuelve a salir
+tramo tras tramo en el mismo sitio y una sombra entre las hojas sale una vez y
+no vuelve.
+
+Además, los **picos sueltos** más fuertes se proponen siempre, aunque no
+puedan emparejarse con nadie: si las dos luces están fundidas en un punto, ese
+punto es todo lo que hay, y hay que leerlo por color.
+
+### Lo que se mide dentro del recuadro
 
 ```
-luminancia = (R+G+B)/3      apagado o encendido
-croma      = (R−G)/(R+G)    roja (+) · verde (−) · las dos (~0)
+brillo     media del 5 % de píxeles más brillantes
+quemados   cuántos píxeles pasan del umbral de saturación
+luminancia (R+G+B)/3                apagado o encendido
+croma      (R−G)/(R+G)              roja (+) · verde (−) · las dos (~0)
 ```
+
+El croma se saca de una media de todo el recuadro **pesada por el brillo al
+cuadrado**, para que las dos luces aporten cuando están las dos encendidas.
+Dividir por (R+G) lo hace independiente de la exposición.
 
 Se resta el verde y no el azul a propósito: el LED rojo se ve **magenta** en la
 cámara, porque satura también el canal azul.
+
+### El recuadro que se marca a mano dice **dónde buscar**, no dónde medir
+
+Con la tecla `m` en vivo, o con `--zona x,y,w,h` en un archivo, se limita la
+zona en la que se buscan las luces. Sirve cuando hay muchas cosas moviéndose
+alrededor, y además va más rápido. Dónde **medir** lo sigue decidiendo el
+programa, que lo hace mejor que un rectángulo a pulso.
 
 ## La cámara en vivo
 
@@ -459,8 +560,16 @@ python rx_camara.py --camaras          lista las que responden y su número
 python rx_camara.py --camara 1         escucha esa
 ```
 
-Mientras escucha: **q** sale · **r** reinicia la escucha · **+** y **−** suben
-y bajan la exposición. El descifrado corre aparte, así que la ventana responde
+Mientras escucha: **q** sale · **r** reinicia la escucha · **m** limita la
+búsqueda a un recuadro · **a** vuelve a buscar en todo el cuadro · **z**
+enciende y apaga la lupa · **+** y **−** suben y bajan la exposición. Las
+teclas salen escritas en la propia ventana.
+
+La **lupa** es un recuadro en una esquina con la zona ampliada y los recuadros
+de medida dentro: sirve para apuntar la cámara sin acercarse a la pantalla,
+porque a 40 m las luces son cuatro píxeles y en la vista normal no se ve si el
+programa las cogió o está midiendo dos metros al lado. Se configura en
+`PARAMETROS` (`LUPA_*`). El descifrado corre aparte, así que la ventana responde
 siempre. El bloque se **congela** en cuanto un CRC cuadra, para no pisarlo con
 una lectura peor.
 
