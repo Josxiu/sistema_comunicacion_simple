@@ -134,18 +134,33 @@ ANCHO_BUSQUEDA = 640
 # Cuadros seguidos para la FFT: 90 son 1,5 s a 60 fps.
 CUADROS_BUSQUEDA = 90
 
-# Fraccion de pixeles -los mas brillantes- sobre los que se calcula la FFT.
+# Fraccion de pixeles sobre los que se calcula la FFT, escogidos por lo que MAS
+# CAMBIA en el tramo (no por lo que mas alumbra: ver abajo).
 #
-# El mapa acaba multiplicado por brillo^2, asi que todo lo oscuro sale cero de
-# todas formas: transformar solo lo que alumbra da EL MISMO resultado mucho mas
-# rapido. Medido sobre un tramo real de 90 cuadros de 640x360:
+# La busqueda era el 75% del tiempo de descifrar un archivo, y transformar la
+# imagen entera es tirar la mayor parte: un pixel que no cambia no puede llevar
+# señal, por brillante que sea. Medido sobre un tramo real de 90 cuadros:
+# 1565 ms -> 128 ms, con los mismos picos.
 #
-#       imagen entera (230.400 px)  1565 ms
-#       el 2% mas brillante          128 ms   <- picos identicos
+# EL CRITERIO ES EL RECORRIDO, NO EL BRILLO, y esto costo una regresion:
+# escoger "el 2% mas brillante" parece equivalente porque el mapa se multiplica
+# por brillo^2, pero no lo es. En una toma real de la caja, la luz estaba en la
+# repisa en sombra y el cielo salia quemado detras:
 #
-# La busqueda era el 75% del tiempo de descifrar un archivo, asi que esto es lo
-# que mas se nota. Subirlo es mas seguro y mas lento; 1.0 lo desactiva.
-FRACCION_PIXELES_FFT = 0.02
+#       brillo de la luz            0,43
+#       corte del 2% mas brillante  0,82
+#       pixeles mas brillantes que la luz:  38% del cuadro
+#
+# o sea que la luz -el unico punto util de la imagen- quedaba fuera. El
+# recorrido (maximo menos minimo en el tramo) no tiene ese problema: el cielo
+# quemado no cambia y la luz recorre medio rango.
+#
+# Subirlo es mas seguro y mas lento; 1.0 lo desactiva y transforma todo.
+FRACCION_PIXELES_FFT = 0.05
+
+# Recorrido minimo, en niveles, para que un pixel entre en la FFT. Por debajo
+# de esto lo que cambia es el ruido del sensor y no hay señal que buscar.
+RECORRIDO_MINIMO_FFT = 6.0
 
 # Tramos del video de donde se sacan candidatas. Saltar de tramo en tramo es lo
 # que hace rapida la busqueda.
@@ -928,27 +943,27 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
 
     pila = np.stack([gris(f) for f in bloque])
     forma = pila.shape[1:]
-    # El maximo temporal, no el percentil 95: da practicamente lo mismo (una
-    # luz que se enciende llega a su tope en muchos cuadros) y cuesta 10 ms en
-    # vez de 620, porque el percentil tiene que ordenar cada pixel.
-    brillo = pila.max(0) / 255.0
-    pila = (pila - pila.mean(0, keepdims=True)).reshape(len(bloque), -1)
-    llano = brillo.ravel()
 
-    # SOLO SE TRANSFORMA LO QUE ALUMBRA. El resultado se multiplica por
-    # brillo^2, asi que lo oscuro acaba en cero de todas formas y transformarlo
-    # es tiempo tirado: sobre un tramo real, 1565 ms -> 128 ms con los mismos
-    # picos. Ver FRACCION_PIXELES_FFT.
+    # SOLO SE TRANSFORMA LO QUE CAMBIA. Un pixel quieto no puede llevar señal
+    # por brillante que sea, asi que la FFT sobre el resto es tiempo tirado.
+    # El recorrido (maximo menos minimo) sale de dos pasadas y cuesta nada.
+    recorrido = (pila.max(0) - pila.min(0)).ravel()
     if 0 < FRACCION_PIXELES_FFT < 1.0:
-        corte = float(np.quantile(llano, 1.0 - FRACCION_PIXELES_FFT))
-        indices = np.flatnonzero(llano >= corte)
+        corte = float(np.quantile(recorrido, 1.0 - FRACCION_PIXELES_FFT))
+        indices = np.flatnonzero(recorrido >= max(corte, RECORRIDO_MINIMO_FFT))
     else:
-        indices = np.arange(llano.size)
+        indices = np.arange(recorrido.size)
     if indices.size == 0:
         return np.zeros(forma, np.float32)
-    pila = pila[:, indices]
 
-    espectro = np.abs(np.fft.rfft(pila, axis=0))
+    plano = pila.reshape(len(bloque), -1)[:, indices]
+    # El brillo se mide con el percentil 95 y no con el maximo, para que un
+    # cuadro con ruido no ascienda un pixel cualquiera. Ahora sale barato
+    # porque va solo sobre los pixeles escogidos, que son una fraccion.
+    brillo = np.percentile(plano, 95, axis=0) / 255.0
+    plano = plano - plano.mean(0, keepdims=True)
+
+    espectro = np.abs(np.fft.rfft(plano, axis=0))
     frec = np.fft.rfftfreq(len(bloque), d=1.0 / max(1e-6, fps))
     util = (frec >= banda[0]) & (frec <= banda[1])
     if not util.any():                   # bloque tan corto que no hay bandas
@@ -959,8 +974,8 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
     if lentas.any():
         pico = pico * np.minimum(1.0, pico / (espectro[lentas].max(0) + 1.0))
 
-    mapa = np.zeros(llano.size, np.float32)
-    mapa[indices] = pico * llano[indices] ** 2
+    mapa = np.zeros(recorrido.size, np.float32)
+    mapa[indices] = pico * brillo ** 2
     return mapa.reshape(forma)
 
 
@@ -3536,7 +3551,7 @@ GRID_PRUEBA = [["H", "O", "L", "A"], [NEGRO] * 4,
 
 
 def video_de_prueba(ruta, sps=7.0, fps=60.0, copias=2, separacion=36,
-                    radio=4, ancho=1280, alto=720, semilla=7):
+                    radio=4, ancho=1280, alto=720, semilla=7, brillo_luz=1.0):
     """Fabrica un video con dos luces transmitiendo GRID_PRUEBA.
 
     Existe para que la autoprueba pueda tocar PIXELES. La autoprueba de toda
@@ -3550,6 +3565,13 @@ def video_de_prueba(ruta, sps=7.0, fps=60.0, copias=2, separacion=36,
     mueve despacio (la firma de una persona pasando) y ruido de sensor. Las
     luces salen con NUCLEO DE COLOR y halo, no con nucleo blanco, que es lo que
     hace falta para que el modo por color se pueda probar.
+
+    Y lleva un CIELO QUEMADO ocupando un tercio del cuadro, con las luces
+    abajo, en sombra. Eso no es decorado: es el caso que rompio la busqueda una
+    vez. En una toma real de la caja la luz estaba en la repisa a la sombra y
+    el 38% del cuadro era mas brillante que ella, asi que cualquier atajo que
+    escoja pixeles "por brillo" la tira. Con 'brillo_luz' por debajo de 1 la
+    luz se hace todavia mas tenue que el fondo.
     """
     rng = np.random.default_rng(semilla)
     bits = construir_trama(TIPO_BLOQUE, len(GRID_PRUEBA), len(GRID_PRUEBA[0]),
@@ -3561,9 +3583,13 @@ def video_de_prueba(ruta, sps=7.0, fps=60.0, copias=2, separacion=36,
 
     fondo = np.zeros((alto, ancho, 3), np.uint8)
     fondo[:] = (140, 150, 160)
-    cv2.rectangle(fondo, (ancho // 6, alto // 4),
-                  (ancho * 5 // 6, alto * 4 // 5), (70, 85, 110), -1)
-    cx, cy = ancho // 2, alto // 2
+    # cielo quemado arriba: mucho mas brillante que la luz y completamente
+    # quieto. Tiene que estar, ver el docstring.
+    fondo[:alto // 3, :] = (252, 252, 252)
+    # la fachada, en sombra, que es donde van las luces
+    cv2.rectangle(fondo, (ancho // 6, alto // 3),
+                  (ancho * 5 // 6, alto * 4 // 5), (46, 54, 66), -1)
+    cx, cy = ancho // 2, alto * 3 // 5
 
     escritor = cv2.VideoWriter(str(ruta), cv2.VideoWriter_fourcc(*"mp4v"),
                                fps, (ancho, alto))
@@ -3588,7 +3614,7 @@ def video_de_prueba(ruta, sps=7.0, fps=60.0, copias=2, separacion=36,
             halo = np.exp(-d2 / (2.0 * (radio * 3.0) ** 2))
             nucleo = np.exp(-d2 / (2.0 * radio ** 2))
             for c in range(3):
-                capa[:, :, c] += (halo * 0.85 + nucleo) * color[c]
+                capa[:, :, c] += (halo * 0.85 + nucleo) * color[c] * brillo_luz
         capa += rng.normal(0, 2.0, capa.shape)
         escritor.write(np.clip(capa, 0, 255).astype(np.uint8))
     escritor.release()
@@ -3610,17 +3636,22 @@ def autoprueba_pdi():
         return 0
 
     fallos = []
-    for nombre, sep in (("dos luces separadas", 36),
-                        ("dos luces fundidas en un punto", 5)):
-        if sep != 36:
-            video_de_prueba(ruta, separacion=sep, radio=3)
+    for nombre, kw in (
+            ("dos luces separadas", {}),
+            ("dos luces fundidas en un punto", {"separacion": 5, "radio": 3}),
+            # la luz mas tenue que el cielo del fondo: el caso que rompio la
+            # busqueda cuando escogia los pixeles por brillo
+            ("una luz tenue con el cielo quemado",
+             {"separacion": 5, "radio": 3, "brillo_luz": 0.45})):
+        if kw:
+            video_de_prueba(ruta, **kw)
         t0 = time.time()
         grid, nota, _, _ = procesar_video(str(ruta), verboso=False)
         marca = "OK " if grid == GRID_PRUEBA else "FALLO"
         if grid != GRID_PRUEBA:
             fallos.append(nombre)
-        print("  %-32s %s  (%.0f s)  %s"
-              % (nombre, marca, time.time() - t0, nota.split("\n")[0][:46]))
+        print("  %-36s %s  (%.0f s)  %s"
+              % (nombre, marca, time.time() - t0, nota.split("\n")[0][:42]))
 
     try:
         ruta.unlink()

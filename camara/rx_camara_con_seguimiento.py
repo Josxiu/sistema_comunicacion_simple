@@ -176,11 +176,15 @@ SEMILLAS_SEGUIMIENTO = 2
 # debajo de 2 Hz).
 BANDA_PARPADEO = (2.0, 25.0)
 
-# Fraccion de pixeles -los mas brillantes- sobre los que se calcula la FFT del
-# mapa de luz. El mapa acaba multiplicado por brillo^2, asi que lo oscuro sale
-# cero de todas formas y transformarlo es tiempo tirado. 1.0 lo desactiva.
-# En el seguimiento se nota el doble: mapa_luz se llama una vez por ancla.
-FRACCION_PIXELES_FFT = 0.02
+# Fraccion de pixeles sobre los que se calcula la FFT del mapa de luz,
+# escogidos por lo que MAS CAMBIA (no por lo que mas alumbra: un pixel quieto
+# no puede llevar señal, y la luz puede estar en sombra con el cielo quemado
+# detras). 1.0 lo desactiva. En el seguimiento se nota el doble: mapa_luz se
+# llama una vez por ancla.
+FRACCION_PIXELES_FFT = 0.05
+
+# Recorrido minimo, en niveles, para que un pixel entre en la FFT.
+RECORRIDO_MINIMO_FFT = 6.0
 
 # Separacion (min, max) entre las dos luces, en px de la imagen de trabajo,
 # para darlas por buenas al buscarlas.
@@ -813,25 +817,29 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
         f.astype(np.float32).mean(2) if f.ndim == 3 else f.astype(np.float32),
         (3, 3), 0) for f in bloque])
     forma = pila.shape[1:]
-    # el maximo temporal en vez del percentil 95: da lo mismo y cuesta 10 ms
-    # en vez de 620, porque el percentil tiene que ordenar cada pixel
-    brillo = pila.max(0) / 255.0
-    pila = (pila - pila.mean(0, keepdims=True)).reshape(len(bloque), -1)
-    llano = brillo.ravel()
 
-    # SOLO SE TRANSFORMA LO QUE ALUMBRA: el resultado se multiplica por
-    # brillo^2, asi que lo oscuro acaba en cero de todas formas. Medido sobre
-    # un tramo real de 90 cuadros de 640x360, 1565 ms -> 128 ms con los mismos
-    # picos. Aqui se nota el doble, porque el seguimiento llama a esto una vez
-    # por ancla y por semilla. Ver FRACCION_PIXELES_FFT.
-    if 0 < FRACCION_PIXELES_FFT < 1.0 and llano.size > 4000:
-        corte = float(np.quantile(llano, 1.0 - FRACCION_PIXELES_FFT))
-        indices = np.flatnonzero(llano >= corte)
+    # SOLO SE TRANSFORMA LO QUE CAMBIA. Un pixel quieto no puede llevar señal
+    # por brillante que sea, asi que la FFT sobre el resto es tiempo tirado.
+    # Aqui se nota el doble, porque el seguimiento llama a esto una vez por
+    # ancla y por semilla.
+    #
+    # OJO con el criterio: tiene que ser el RECORRIDO, no el brillo. Escoger
+    # "los mas brillantes" parece equivalente porque el mapa se multiplica por
+    # brillo^2, pero no lo es: en una toma real de la caja la luz estaba en la
+    # repisa en sombra y el 38% del cuadro era mas brillante que ella.
+    recorrido = (pila.max(0) - pila.min(0)).ravel()
+    if 0 < FRACCION_PIXELES_FFT < 1.0 and recorrido.size > 4000:
+        corte = float(np.quantile(recorrido, 1.0 - FRACCION_PIXELES_FFT))
+        indices = np.flatnonzero(recorrido >= max(corte, RECORRIDO_MINIMO_FFT))
     else:
-        indices = np.arange(llano.size)
+        indices = np.arange(recorrido.size)
     if indices.size == 0:
         return np.zeros(forma, np.float32)
-    pila = pila[:, indices]
+
+    pila = pila.reshape(len(bloque), -1)[:, indices]
+    llano = np.zeros(recorrido.size, np.float32)
+    llano[indices] = np.percentile(pila, 95, axis=0) / 255.0
+    pila = pila - pila.mean(0, keepdims=True)
 
     espectro = np.abs(np.fft.rfft(pila, axis=0))
     frec = np.fft.rfftfreq(len(bloque), d=1.0 / max(1e-6, fps))
