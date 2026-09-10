@@ -9,21 +9,29 @@ Sin argumentos pregunta que analizar. Solo necesita numpy y opencv-python.
     python rx_camara.py --video "toma.mp4"
     python rx_camara.py --camara 1
     python rx_camara.py --camaras                 lista las camaras del PC
-    python rx_camara.py --simular-vivo "toma.mp4" video por el camino de la camara
+    python rx_camara.py --simular-vivo "toma.mp4"  un video, como si fuera
+                                                  la camara en vivo
     python rx_camara.py --autoprueba              revisa el codigo sin camara
 
-Secciones (se leen de arriba abajo, cada una usa solo las anteriores):
+Secciones. Se leen de arriba abajo y cada una usa solo las anteriores, asi
+que se puede entrar por cualquiera sin haber leido lo de abajo:
 
     0. PARAMETROS      lo ajustable, todo junto.
     1. EL CODIGO       bits <-> celdas.
-    2. PDI             imagen -> posicion y estado de las luces.
+    2. PDI             imagen -> donde estan las luces y cual esta prendida.
+         2.1 medir un recuadro      pixeles  -> numeros
+         2.2 de numeros a estados   numeros  -> que luz esta prendida
+         2.3 encontrar las luces    imagen   -> coordenadas
     3. DECODIFICADOR   estados en el tiempo -> bloque de celdas.
     4. MEDIR           archivo o camara, por el mismo camino.
+         4.1 lo que se mide de una pareja      4.4 abrir la camara
+         4.2 de lo medido al bloque            4.5 la camara en vivo
+         4.3 un archivo de video
     5. INTERFAZ        elegir la fuente y pintar el resultado.
     6. ARRANQUE
 
-Las 1 y 3 son puro calculo (--autoprueba las prueba), la 2 es la unica que
-toca pixeles y la 5 la unica que abre ventanas.
+Las 1 y 3 son puro calculo y --autoprueba las prueba enteras; la 2 es la unica
+que toca pixeles y la 5 la unica que abre ventanas.
 
 Cosas a tener en cuenta:
 
@@ -34,8 +42,9 @@ Cosas a tener en cuenta:
   video a menos fps se come el margen.
 - La camara tiene que estar quieta. Para tomas a pulso esta
   rx_camara_con_seguimiento.py, que sigue las luces cuadro a cuadro.
-- Un celular a 60 fps por IP Webcam es lo mejor (--camara http://IP:8080/video);
-  tambien vale DroidCam/Iriun/EpocCam o el Enlace movil de Windows. Imagen
+- Un celular a 60 fps por IP Webcam es lo mejor (--camara
+  http://IP:8080/video); tambien vale DroidCam, Iriun, EpocCam o el Enlace
+  movil de Windows. Imagen
   negra = tapa de privacidad, otra app usando la camara, o exposicion baja.
 """
 
@@ -111,12 +120,28 @@ MAX_PAREJAS_ARCHIVO = 8
 # movio. Por debajo es temblor de la rejilla (1 px reducido = 3 del original).
 DERIVA_MINIMA_PX = 10.0
 
+# Cuando dos propuestas de la busqueda son la misma pareja. La SEPARACION es
+# la que identifica al montaje, porque es fija; el punto puede bailar mas, ya
+# que la busqueda trabaja sobre el cuadro reducido.
+TOLERANCIA_SEPARACION_PX = 14.0
+TOLERANCIA_PUNTO_PX = 90.0
+
 # --- MEDIR ----------------------------------------------------------------
 # A partir de que valor un pixel cuenta como quemado (ver saturados()).
 UMBRAL_SATURADO = 240
 
-# Cada cuantas muestras se recalculan los umbrales moviles; en medio se
-# interpolan. Son percentiles de +-260 muestras, casi no se mueven.
+# Nada se decide con valores absolutos: una luz esta "prendida" cuando pasa de
+# esta fraccion de su propio recorrido, y solo si el recorrido llega al margen.
+# Subir el margen ignora luces debiles; bajarlo hace caso a cualquier sombra.
+MARGEN_PARPADEO = 4.0
+FRAC_ENCENDIDO = 0.45
+
+# Muestras a cada lado para los percentiles moviles (~4 s a 60 fps). Tiene que
+# cubrir varias copias del bloque, no un simbolo.
+VENTANA_UMBRALES = 260
+
+# Cada cuantas muestras se recalculan esos percentiles; en medio se interpolan.
+# Casi no se mueven, asi que calcularlos uno a uno era 40 veces mas caro.
 PASO_UMBRALES = 20
 
 # Rachas mas cortas que esta fraccion del simbolo se tiran: glitch de que las
@@ -334,7 +359,8 @@ def simbolos_a_trits(simbolos, estado_inicial=APAGADO):
 def codificar_linea(bits):
     """Cadena de bits -> lista completa de estados, con preambulo y SFD."""
     simbolos = list(PREAMBULO) + list(SFD)
-    simbolos += trits_a_simbolos(bits_a_trits(bits), estado_inicial=simbolos[-1])
+    simbolos += trits_a_simbolos(bits_a_trits(bits),
+                                 estado_inicial=simbolos[-1])
     return simbolos
 
 
@@ -462,19 +488,26 @@ def analizar_trama(bits):
 
 # ##########################################################################
 #  2. PDI
-#     Lo unico de todo el archivo que toca pixeles: de una imagen sale un par
-#     de numeros (luminancia, croma) y de una serie de esos sale el estado de
-#     las luces en cada cuadro.
+#     La unica parte que toca pixeles, en el orden en que se usa:
+#
+#       2.1  de un recuadro salen numeros    brillo, quemados, croma
+#       2.2  de los numeros sale un estado   que luz esta prendida
+#       2.3  de una imagen salen coordenadas donde estan las luces
+#
+#     Las dos primeras miran un sitio que ya se conoce; la tercera es la que
+#     lo encuentra. Ninguna guarda imagenes: de cada cuadro salen cuatro
+#     numeros y el cuadro se tira.
 # ##########################################################################
+
+# ---------------------------------------------- 2.1 medir un recuadro -----
 
 def suavizar(img, k=5):
     """GaussianBlur que nunca revienta.
 
-    Con recuadros diminutos, o cuando OpenCV se queda sin memoria, GaussianBlur
-    lanza una excepcion de C++ sin mensaje ninguno. Leyendo un archivo eso es
-    una molestia; en vivo tumbaba una escucha que llevaba un minuto acumulando,
-    por un solo cuadro raro. Si falla se sigue con la imagen sin suavizar: mide
-    un poco peor y no se pierde la toma.
+    Con recuadros diminutos, o si OpenCV se queda sin memoria, GaussianBlur
+    lanza una excepcion de C++ sin mensaje. En vivo eso tumbaba una escucha de
+    un minuto por un solo cuadro raro; sin suavizar se mide algo peor, pero no
+    se pierde la toma.
     """
     if img.size == 0:
         return img
@@ -482,6 +515,57 @@ def suavizar(img, k=5):
         return cv2.GaussianBlur(img, (k, k), 0)
     except cv2.error:
         return img
+
+
+def recorte_centrado(f, centro, lado):
+    """El cuadradito de una luz, siempre dentro de la imagen."""
+    alto, ancho = f.shape[:2]
+    d = int(np.clip(lado, 1, max(1, min(alto, ancho) // 2 - 1)))
+    x = int(np.clip(round(centro[0]), d, ancho - d - 1))
+    y = int(np.clip(round(centro[1]), d, alto - d - 1))
+    return np.ascontiguousarray(f[y - d:y + d, x - d:x + d])
+
+
+def recorte_caja(f, caja):
+    """Un recuadro (x, y, ancho, alto) cualquiera, recortado a la imagen."""
+    alto, ancho = f.shape[:2]
+    x0, y0, w, h = caja
+    x0 = int(np.clip(x0, 0, max(0, ancho - 6)))
+    y0 = int(np.clip(y0, 0, max(0, alto - 6)))
+    x1 = int(np.clip(x0 + w, x0 + 6, ancho))
+    y1 = int(np.clip(y0 + h, y0 + 6, alto))
+    return np.ascontiguousarray(f[y0:y1, x0:x1])
+
+
+def brillo_de(roi):
+    """Luminancia media del 5% de pixeles mas brillantes del recuadro.
+
+    Promediar el recuadro entero diluye una luz pequeña hasta borrarla, asi
+    que solo cuenta la parte que alumbra.
+    """
+    if roi.size == 0:
+        return 0.0
+    suave = suavizar(roi).astype(np.float32)
+    plano = (suave.mean(2) if suave.ndim == 3 else suave).ravel()
+    n = max(6, int(plano.size * 0.05))
+    return float(np.sort(plano)[-n:].mean())
+
+
+def saturados(roi, umbral=UMBRAL_SATURADO):
+    """Cuantos pixeles del recuadro estan quemados. Otra forma de "prendida".
+
+    De dia el brillo casi no sirve: la escena esta iluminada y el LED nunca se
+    ve oscuro (223 a 251 al aire libre, que se lo come cualquier sombra),
+    mientras que esta cuenta va de 0 a 350. Lo que desaparece al apagarse no
+    es el NIVEL del nucleo sino su AREA, y por eso el umbral es fijo.
+
+    No sustituye al brillo, que es el que gana cuando el LED no satura -de
+    noche, o tan lejos que el punto mide cuatro pixeles- y aqui sale cero.
+    """
+    if roi.size == 0:
+        return 0.0
+    gris = roi.mean(2) if roi.ndim == 3 else roi
+    return float(np.count_nonzero(gris > umbral))
 
 
 def lum_y_croma(roi):
@@ -492,17 +576,16 @@ def lum_y_croma(roi):
     independiente de la exposicion.
 
     Se mide sobre los pixeles mas brillantes QUE NO ESTEN SATURADOS, y las dos
-    exclusiones importan: promediar el recuadro entero diluye una luz pequeña
-    hasta hacerla desaparecer, y quedarse con el pico tampoco vale porque de
-    cerca el nucleo satura en R=G=B=255 y ahi ya no hay color. El color vive en
-    el halo, justo por debajo de la saturacion.
+    exclusiones importan: promediar el recuadro entero diluye la luz, y
+    quedarse con el pico tampoco vale porque de cerca el nucleo satura en
+    R=G=B=255 y ahi ya no hay color. El color vive en el halo.
     """
     if roi.size == 0:
         return 0.0, 0.0
     suave = suavizar(roi).astype(np.float32)
     b, g, r = suave[:, :, 0], suave[:, :, 1], suave[:, :, 2]
     plano = ((b + g + r) / 3.0).ravel()
-    n = max(12, int(plano.size * 0.001))          # los N mas brillantes
+    n = max(12, int(plano.size * 0.001))
 
     # Primero se descartan los saturados y DESPUES se toman los mas brillantes
     # de lo que queda. Al reves no sirve: con la luz cerca, mas del 3% del
@@ -521,16 +604,51 @@ def lum_y_croma(roi):
     return (mr + mg + mb) / 3.0, (mr - mg) / (mr + mg + 1.0)
 
 
-def umbrales_moviles(v, ventana, bajo=10, alto=90, paso=PASO_UMBRALES):
-    """Dos percentiles de una ventana movil CENTRADA, para toda la serie.
+# ------------------------------------------- 2.2 de numeros a estados -----
+#
+# Ninguna decision usa valores absolutos, siempre el RECORRIDO de la serie en
+# un rato: el control de exposicion del celular deriva durante la toma (en una
+# grabacion real el croma del verde paso de -0,09 a -0,21) y con umbrales fijos
+# el preambulo se lee mal y nunca engancha.
 
-    Se calculan cada 'paso' muestras y se interpolan en medio: ver
-    PASO_UMBRALES. Devuelve dos vectores del largo de v.
+
+def recorrido(v):
+    """(p10, p90) de una serie: entre esos dos valores se mueve la luz."""
+    return float(np.percentile(v, 10)), float(np.percentile(v, 90))
+
+
+def hay_cambio(p10, p90):
+    """Si el recorrido da para creer que ahi hay una luz que se enciende.
+
+    Vale con escalares y con los vectores de umbrales_moviles.
     """
-    n = len(v)
+    return (p90 - p10) >= MARGEN_PARPADEO
+
+
+def encendida(v, p10, p90, frac=FRAC_ENCENDIDO):
+    """Mascara de "la luz esta prendida en este cuadro"."""
+    return np.asarray(v) >= p10 + frac * (p90 - p10)
+
+
+def anclas_de(n, paso=PASO_UMBRALES):
+    """Muestras donde se calculan de verdad los umbrales.
+
+    Entre ancla y ancla se interpola: ver PASO_UMBRALES.
+    """
     anclas = np.arange(0, n, paso)
     if len(anclas) == 0 or anclas[-1] != n - 1:
         anclas = np.append(anclas, n - 1)
+    return anclas
+
+
+def umbrales_moviles(v, ventana=VENTANA_UMBRALES, bajo=10, alto=90,
+                     paso=PASO_UMBRALES):
+    """Dos percentiles de una ventana movil CENTRADA, para toda la serie.
+
+    Devuelve dos vectores del largo de v.
+    """
+    n = len(v)
+    anclas = anclas_de(n, paso)
     lo = np.empty(len(anclas), dtype=np.float32)
     hi = np.empty(len(anclas), dtype=np.float32)
     for k, i in enumerate(anclas):
@@ -542,14 +660,30 @@ def umbrales_moviles(v, ventana, bajo=10, alto=90, paso=PASO_UMBRALES):
     return np.interp(todos, anclas, lo), np.interp(todos, anclas, hi)
 
 
-def clasificar_por_color(lums, cromas, ventana=260):
+def clasificar_por_posicion(brillos_a, brillos_b, ventana=VENTANA_UMBRALES):
+    """Dos series de brillo -> estado de las luces en cada cuadro.
+
+    estado = (A prendida) + 2*(B prendida). Sirve con luces del mismo color,
+    que es lo normal; lo unico que hace falta es verlas como dos puntos.
+    """
+    a = np.asarray(brillos_a, dtype=np.float32)
+    b = np.asarray(brillos_b, dtype=np.float32)
+    n = len(a)
+    if n == 0 or len(b) != n:
+        return []
+    estados = np.zeros(n, dtype=int)
+    for serie, peso in ((a, LUZ_A), (b, LUZ_B)):
+        p10, p90 = umbrales_moviles(serie, ventana)
+        estados += peso * (hay_cambio(p10, p90) & encendida(serie, p10, p90))
+    return list(estados)
+
+
+def clasificar_por_color(lums, cromas, ventana=VENTANA_UMBRALES):
     """Series de (luminancia, croma) -> estado de las luces en cada cuadro.
 
-    Los umbrales se recalculan sobre una ventana movil centrada. Es obligatorio
-    porque el control de exposicion del celular deriva durante la toma: en una
-    grabacion real el croma del verde paso de -0,09 (exposicion alta, al
-    principio) a -0,21 (ya estabilizada). Con umbrales fijos el preambulo se
-    lee mal y nunca engancha.
+    La unica forma de leerlas cuando estan tan lejos que se funden en un solo
+    punto y ya no hay dos sitios que mirar. A cambio exige que sean de colores
+    distintos.
     """
     lums = np.asarray(lums, dtype=np.float32)
     cromas = np.asarray(cromas, dtype=np.float32)
@@ -558,25 +692,24 @@ def clasificar_por_color(lums, cromas, ventana=260):
         return []
     p10, p90 = umbrales_moviles(lums, ventana)
     corte_off = p10 + 0.35 * (p90 - p10)
+    # aqui el minimo de recorrido es mayor que MARGEN_PARPADEO: para separar
+    # DOS colores hace falta mas señal que para ver si una luz se enciende
     apagado = (p90 - p10 < 6) | (lums < corte_off)
 
-    # los umbrales de croma dependen de QUE muestras estan encendidas en cada
-    # ventana, asi que van por anclas igual que los de luminancia
-    anclas = np.arange(0, n, PASO_UMBRALES)
-    if anclas[-1] != n - 1:
-        anclas = np.append(anclas, n - 1)
-    ct1 = np.empty(len(anclas), dtype=np.float32)
-    ct2 = np.empty(len(anclas), dtype=np.float32)
+    # Los umbrales de croma dependen de QUE muestras estan encendidas en cada
+    # ventana, asi que se calculan por anclas igual que los de luminancia. Un
+    # ancla sin color utilizable se queda en cero y no aporta.
+    anclas = anclas_de(n)
+    ct1 = np.zeros(len(anclas), dtype=np.float32)
+    ct2 = np.zeros(len(anclas), dtype=np.float32)
     hay = np.zeros(len(anclas), dtype=np.float32)
     for k, i in enumerate(anclas):
         a, b = max(0, i - ventana), min(n, i + ventana)
-        encendidos = cromas[a:b][lums[a:b] >= corte_off[i]]
-        if len(encendidos) < 10:
-            ct1[k] = ct2[k] = 0.0
+        prendidos = cromas[a:b][lums[a:b] >= corte_off[i]]
+        if len(prendidos) < 10:
             continue
-        lo, hi = np.percentile(encendidos, (12, 88))
+        lo, hi = np.percentile(prendidos, (12, 88))
         if hi - lo < 0.02:              # un solo color en la ventana
-            ct1[k] = ct2[k] = 0.0
             continue
         ct1[k] = lo + 0.34 * (hi - lo)
         ct2[k] = lo + 0.68 * (hi - lo)
@@ -593,7 +726,7 @@ def clasificar_por_color(lums, cromas, ventana=260):
     return list(estados)
 
 
-# Intercambiar cual luz es 'A' y cual es 'B'. NO es simetrico: el orden de los
+# Cambiar cual luz es la A y cual la B. NO es simetrico: el orden de los
 # destinos cambia y con el los trits, asi que un cableado invertido produce
 # basura con CRC fallido. Se prueban las dos y punto.
 INTERCAMBIO = {APAGADO: APAGADO, LUZ_A: LUZ_B, LUZ_B: LUZ_A, AMBAS: AMBAS}
@@ -604,62 +737,30 @@ def intercambiar(estados):
     return [INTERCAMBIO[s] for s in estados]
 
 
-# ------------------------------------------------ donde estan las luces ---
-def brillo_de(roi):
-    """Luminancia media de los pixeles mas brillantes del recuadro.
+# ------------------------------------------- 2.3 encontrar las luces ------
 
-    Version reducida de lum_y_croma() para el modo por posicion: aqui no hace falta
-    el color, solo si esa luz esta prendida.
+def reducir_para_buscar(f, zona=None):
+    """El cuadro como lo mira la busqueda: recortado, reducido y en gris.
+
+    Buscar no necesita resolucion (medir si, y por eso mide aparte sobre el
+    cuadro entero). Con 'zona' se busca solo dentro de ese recuadro, que
+    ademas de acertar mas es mas rapido.
+
+    Devuelve (gris, escala, origen): con esos dos ultimos se devuelve
+    cualquier coordenada de aqui a pixeles del cuadro original.
     """
-    if roi.size == 0:
-        return 0.0
-    suave = suavizar(roi).astype(np.float32)
-    plano = (suave.mean(2) if suave.ndim == 3 else suave).ravel()
-    n = max(6, int(plano.size * 0.05))
-    return float(np.sort(plano)[-n:].mean())
-
-
-def saturados(roi, umbral=UMBRAL_SATURADO):
-    """Cuantos pixeles del recuadro estan quemados. Otra forma de "prendida".
-
-    De dia el brillo casi no sirve: la escena entera esta iluminada y el LED
-    nunca se ve oscuro. En las tomas al aire libre el promedio de los pixeles
-    mas brillantes va de 223 a 251 -un 10% de recorrido, que se come cualquier
-    sombra-, mientras que el mismo recuadro contando quemados va de 0 a 350. Lo
-    que desaparece al apagarse no es el nivel del nucleo, es su AREA; por eso el
-    umbral es fijo y no un percentil.
-
-    No sustituye al brillo: el brillo gana cuando el LED no satura (de noche, o
-    tan lejos que el punto mide cuatro pixeles) y ahi esta cuenta da cero.
-    """
-    if roi.size == 0:
-        return 0.0
-    gris = roi.mean(2) if roi.ndim == 3 else roi
-    return float(np.count_nonzero(gris > umbral))
-
-
-def clasificar_por_posicion(brillos_a, brillos_b, ventana=260):
-    """Dos series de brillo -> estado de las luces.
-
-    estado = (A prendida) + 2*(B prendida). El umbral de cada luz se saca de su
-    propia ventana movil, igual que en el modo por color y por el mismo motivo:
-    la exposicion de la camara deriva durante la toma.
-    """
-    a = np.asarray(brillos_a, dtype=np.float32)
-    b = np.asarray(brillos_b, dtype=np.float32)
-    n = len(a)
-    if n == 0 or len(b) != n:
-        return []
-    estados = np.zeros(n, dtype=int)
-    for serie, peso in ((a, 1), (b, 2)):
-        p10, p90 = umbrales_moviles(serie, ventana)
-        cambia = (p90 - p10) >= 4       # si no, esa luz no cambia en la ventana
-        prendida = cambia & (serie >= p10 + 0.45 * (p90 - p10))
-        estados += peso * prendida
-    return list(estados)
-
-
-# ------------------------------------------------ donde estan las luces ---
+    g, origen = f, (0.0, 0.0)
+    if zona:
+        x, y, w, h = (int(v) for v in zona)
+        x, y = max(0, x), max(0, y)
+        recorte = f[y:y + h, x:x + w]
+        if recorte.shape[0] > 16 and recorte.shape[1] > 16:
+            g, origen = recorte, (float(x), float(y))
+    esc = min(1.0, float(ANCHO_BUSQUEDA) / g.shape[1])
+    if esc < 1.0:
+        g = cv2.resize(g, None, fx=esc, fy=esc)
+    gris = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY) if g.ndim == 3 else g.copy()
+    return gris, 1.0 / esc, origen
 
 
 def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
@@ -667,24 +768,28 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
 
     El maximo de varianza no sirve al aire libre: gana la gente que pasa, que
     ocupa mucha mas imagen que un LED de 5 px. Lo que distingue a la luz es el
-    RITMO (cambia a 5-12 simbolos/s; una persona caminando por debajo de 2 Hz)
-    y el BRILLO (satura, y el resto de la escena no). Se toma la amplitud del
-    pico en la banda util, se castiga la energia lenta -la firma del que
-    camina- y se multiplica por el brillo al cuadrado.
+    RITMO (5-12 simbolos/s; una persona caminando va por debajo de 2 Hz) y el
+    BRILLO (satura, y el resto de la escena no). Se toma la amplitud del pico
+    en la banda util, se castiga la energia lenta -la firma del que camina- y
+    se multiplica por el brillo al cuadrado.
     """
-    # el bloque puede venir en color (un video) o en gris (la camara en vivo,
-    # que guarda el buffer de busqueda en gris para que quepa a 640 px)
-    pila = np.stack([cv2.GaussianBlur(
-        f.astype(np.float32).mean(2) if f.ndim == 3 else f.astype(np.float32),
-        (3, 3), 0) for f in bloque])
+    def gris(f):
+        # el bloque llega en color (un video) o ya en gris (la camara en vivo,
+        # que guarda el buffer de busqueda en gris para que quepa a 640 px)
+        g = f.astype(np.float32)
+        return cv2.GaussianBlur(g.mean(2) if g.ndim == 3 else g, (3, 3), 0)
+
+    pila = np.stack([gris(f) for f in bloque])
     brillo = np.percentile(pila, 95, axis=0) / 255.0
     pila = pila - pila.mean(0, keepdims=True)
+
     espectro = np.abs(np.fft.rfft(pila, axis=0))
     frec = np.fft.rfftfreq(len(bloque), d=1.0 / max(1e-6, fps))
     util = (frec >= banda[0]) & (frec <= banda[1])
     if not util.any():                   # bloque tan corto que no hay bandas
         util = frec > 0
     pico = espectro[util].max(0)
+
     lentas = (frec > 0) & (frec < banda[0])
     if lentas.any():
         pico = pico * np.minimum(1.0, pico / (espectro[lentas].max(0) + 1.0))
@@ -696,18 +801,16 @@ def picos_de_luz(mapa, cuantos=4, frac=0.45, margen=2, borde=5):
 
     Separarlos por una distancia fija falla justo donde importa: de cerca el
     halo de una sola luz mide 40 px, asi que los dos primeros picos caen dentro
-    de la MISMA luz y el receptor acaba midiendo dos veces lo mismo (se ve al
-    dibujarlo: los dos circulos encima del mismo LED). Borrando la region
+    de la MISMA luz y se acaba midiendo dos veces lo mismo. Borrando la region
     conexa entera de cada pico, el siguiente ya es la otra luz.
 
-    'borde' tapa el marco de la imagen: el desenfoque y la transformada dejan
-    ahi valores altos que no son ninguna luz, y un punto de partida en la
-    esquina es una pasada entera por el video tirada a la basura.
+    'borde' tapa el marco de la imagen, donde el desenfoque y la transformada
+    dejan valores altos que no son ninguna luz.
     """
     m = mapa.copy()
     if borde:
-        m[:borde, :] = 0; m[-borde:, :] = 0
-        m[:, :borde] = 0; m[:, -borde:] = 0
+        m[:borde, :] = m[-borde:, :] = 0
+        m[:, :borde] = m[:, -borde:] = 0
     salida = []
     for _ in range(cuantos):
         y, x = np.unravel_index(np.argmax(m), m.shape)
@@ -715,10 +818,12 @@ def picos_de_luz(mapa, cuantos=4, frac=0.45, margen=2, borde=5):
         if alto <= 0:
             break
         salida.append((int(x), int(y), alto))
-        _, etiquetas = cv2.connectedComponents((m >= alto * frac).astype(np.uint8), 8)
+        mancha = (m >= alto * frac).astype(np.uint8)
+        _, etiquetas = cv2.connectedComponents(mancha, 8)
         region = (etiquetas == etiquetas[y, x]).astype(np.uint8)
         if margen:
-            region = cv2.dilate(region, np.ones((2 * margen + 1,) * 2, np.uint8))
+            ancho = 2 * margen + 1
+            region = cv2.dilate(region, np.ones((ancho, ancho), np.uint8))
         m[region > 0] = 0
     return salida
 
@@ -726,23 +831,16 @@ def picos_de_luz(mapa, cuantos=4, frac=0.45, margen=2, borde=5):
 def parpadeo_en(bloque, x, y, lado):
     """Serie de "esta prendido" en un punto del bloque reducido.
 
-    Devuelve (prendida, cambia): un vector de booleanos y si de verdad hay
-    algo que cambie ahi. Los recuadros son diminutos a proposito, porque a esta
-    escala las dos luces estan a trece pixeles y uno grande mediria las dos.
+    Devuelve (prendida, cambia). Los recuadros son diminutos a proposito: a
+    esta escala las dos luces estan a trece pixeles y uno grande mediria las
+    dos a la vez.
     """
-    serie = []
-    for f in bloque:
-        alto, ancho = f.shape[:2]
-        d = int(np.clip(lado, 1, max(1, min(alto, ancho) // 2 - 1)))
-        cx = int(np.clip(x, d, ancho - d - 1))
-        cy = int(np.clip(y, d, alto - d - 1))
-        serie.append(brillo_de(np.ascontiguousarray(
-            f[cy - d:cy + d, cx - d:cx + d])))
-    v = np.asarray(serie, dtype=np.float32)
-    p10, p90 = np.percentile(v, 10), np.percentile(v, 90)
-    if p90 - p10 < 4:
+    v = np.array([brillo_de(recorte_centrado(f, (x, y), lado))
+                  for f in bloque], dtype=np.float32)
+    p10, p90 = recorrido(v)
+    if not hay_cambio(p10, p90):
         return np.zeros(len(v), dtype=bool), False
-    return v >= p10 + 0.45 * (p90 - p10), True
+    return encendida(v, p10, p90), True
 
 
 def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
@@ -753,13 +851,12 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
     parpadeando. Si solo aparece un punto util el vector sale nulo: las luces
     estan fundidas y habra que leerlas por color.
 
-    No decide la altura de los picos sino que los dos puntos LLEVEN SEÑALES
-    DISTINTAS. Las luces salen tambien reflejadas -en un vidrio, en una
-    pantalla apagada, en el piso- y el reflejo parpadea igual de fuerte y al
-    mismo ritmo, asi que emparejando por altura ganaba "una luz y su propio
-    reflejo", que no dice nada. Se mira cuando esta prendido cada punto y se
-    exige que no coincidan siempre: un reflejo coincide el 100% del tiempo y
-    las dos luces de verdad difieren en un tercio de los cuadros.
+    No empareja por altura del pico sino exigiendo que los dos puntos LLEVEN
+    SEÑALES DISTINTAS. Las luces salen tambien reflejadas -en un vidrio, en el
+    piso- y el reflejo parpadea igual de fuerte y al mismo ritmo, asi que por
+    altura ganaba "una luz y su propio reflejo", que no dice nada. Un reflejo
+    coincide con su luz el 100% del tiempo; las dos luces de verdad difieren
+    en un tercio de los cuadros.
     """
     if len(bloque) < 20:
         return []
@@ -767,10 +864,9 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
     if not hallados:
         return []
 
-    # los limites vienen en pixeles del cuadro original; aqui se trabaja
-    # sobre el reducido, asi que hay que dividirlos por la escala
+    # los limites vienen en pixeles del cuadro original y aqui se trabaja sobre
+    # el reducido, asi que hay que dividirlos por la escala
     sep_min, sep_max = (v / max(1.0, escala) for v in SEPARACION_LUCES_PX)
-
     lado = max(2, int(sep_min / 2))
     parpadeos = [parpadeo_en(bloque, x, y, lado) for x, y, _ in hallados]
 
@@ -778,8 +874,8 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
     for i, (xi, yi, vi) in enumerate(hallados):
         if not parpadeos[i][1]:
             continue
-        for j, (xj, yj, vj) in enumerate(hallados):
-            if j <= i or not parpadeos[j][1]:
+        for j, (xj, yj, vj) in enumerate(hallados[i + 1:], start=i + 1):
+            if not parpadeos[j][1]:
                 continue
             if not (sep_min <= math.hypot(xj - xi, yj - yi) <= sep_max):
                 continue
@@ -796,10 +892,9 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
     salida = []
     for puntaje, p, v, distintos in parejas[:cuantas]:
         p, v = p * escala, v * escala
-        salida.append((p + (ox, oy), v,
-                       "dos luces a %.0f px (se diferencian en el %.0f%% de "
-                       "los cuadros)" % (math.hypot(v[0], v[1]), 100 * distintos),
-                       puntaje))
+        nota = ("dos luces a %.0f px (se diferencian en el %.0f%% de los "
+                "cuadros)" % (math.hypot(v[0], v[1]), 100 * distintos))
+        salida.append((p + (ox, oy), v, nota, puntaje))
     if not salida:
         # un solo punto util: o hay una sola luz a la vista, o las dos estan
         # tan lejos que se fundieron. En los dos casos toca leerlas por color.
@@ -810,6 +905,20 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
                                "una sola luz a la vista", 0.0))
                 break
     return salida
+
+
+def misma_pareja(punto_a, sep_a, punto_b, sep_b):
+    """Si dos propuestas de la busqueda son la misma pareja de luces.
+
+    Es lo que deja contar cuantas veces ha vuelto a salir cada pareja, y esa
+    cuenta es lo unico que separa unas luces de unas hojas moviendose: las dos
+    parpadean igual de rapido, pero solo las luces vuelven a salir siempre en
+    el mismo sitio.
+    """
+    return (math.hypot(sep_a[0] - sep_b[0], sep_a[1] - sep_b[1])
+            < TOLERANCIA_SEPARACION_PX and
+            math.hypot(punto_a[0] - punto_b[0], punto_a[1] - punto_b[1])
+            < TOLERANCIA_PUNTO_PX)
 
 
 # ##########################################################################
@@ -844,9 +953,9 @@ def simbolos_estables(estados, cuadros_por_simbolo, frac=FRAC_GLITCH):
 def separar_rafagas(estados, cuadros_por_simbolo):
     """Corta la traza donde las dos luces quedaron apagadas mucho rato.
 
-    Cada copia del bloque llega como una rafaga; separarlas permite probar_periodos
-    cada una por aparte en vez de darle al decodificador un pegote de tres
-    copias seguidas.
+    Cada copia del bloque llega como una rafaga. Separarlas deja probar cada
+    una por aparte, en vez de darle al decodificador un pegote de tres copias
+    seguidas.
     """
     silencio = max(3, int(cuadros_por_simbolo * 3))
     trozos, actual, ceros = [], [], 0
@@ -911,8 +1020,8 @@ def decodificar_traza(traza, cuadros_nominal):
     """Intenta la traza entera y cada rafaga por separado, con las dos
     asignaciones posibles de las luces. Devuelve (info, nota).
 
-    Cual luz es la A y cual la B no se puede saber mirando, y NO es indiferente:
-    el orden de los destinos cambia y con el los trits, asi que un cableado
+    Cual luz es la A y cual la B no se sabe mirando, y NO da igual: el orden
+    de los destinos cambia y con el los trits, asi que un cableado
     invertido produce basura con CRC fallido. Por eso se prueban las dos, salvo
     que LUZ_A_ES_LA_MAS_ROJA diga cual es.
     """
@@ -934,7 +1043,8 @@ def decodificar_traza(traza, cuadros_nominal):
     return None, "sin enganche"
 
 
-def estimar_simbolos_por_s(tiempos, estados, minimo=1.0, maximo=25.0, fps=None):
+def estimar_simbolos_por_s(tiempos, estados, minimo=1.0, maximo=25.0,
+                           fps=None):
     """Simbolos/s leidos de la propia señal, sin que nadie los diga.
 
     El transmisor cambia de estado solo en las fronteras de simbolo, asi que
@@ -1001,17 +1111,23 @@ def a_cuadricula(info):
 
 # ##########################################################################
 #  4. MEDIR
-#     De un archivo de video o de la camara sale un bloque. Es la unica parte
-#     que abre una captura.
+#     De un archivo o de la camara sale un bloque. La unica parte que abre
+#     una captura, y la que junta todo lo anterior:
 #
-#     Los dos caminos usan el mismo motor: buscar las luces con el mapa de
-#     parpadeo sobre unos pocos tramos reducidos, medir cada pareja candidata
-#     en cada cuadro sobre la imagen original, y descifrar de las series. La
-#     diferencia con el camino que habia antes esta en el orden: antes se
-#     elegia un recuadro y se medía la pelicula entera con el, y si fallaba se
-#     empezaba de nuevo con otro. Ahora se miden varias parejas en la misma
-#     pasada, que cuesta casi lo mismo que medir una.
+#       4.1  lo que se mide de una pareja de luces
+#       4.2  de lo medido al bloque
+#       4.3  un archivo de video
+#       4.4  abrir la camara
+#       4.5  la camara en vivo
+#
+#     Los dos caminos -archivo y camara- usan el mismo motor: buscar las luces
+#     sobre unos pocos tramos reducidos, medir cada pareja candidata en cada
+#     cuadro sobre la imagen sin reducir, y descifrar de las series. Se miden
+#     VARIAS parejas en la misma pasada, que cuesta casi lo mismo que medir
+#     una y evita tener que acertar a la primera.
 # ##########################################################################
+
+# ------------------------------ 4.1 lo que se mide de una pareja ----------
 
 @dataclass
 class Lectura:
@@ -1080,7 +1196,7 @@ class Candidato:
                    self.separacion[0], self.separacion[1]))
 
     def roi(self):
-        """Recuadro que abarca las dos luces, en pixeles del cuadro original."""
+        """El recuadro que abarca las DOS luces, en pixeles originales."""
         q = self.punto + self.separacion
         x0 = int(min(self.punto[0], q[0])) - self.lado
         y0 = int(min(self.punto[1], q[1])) - self.lado
@@ -1091,19 +1207,14 @@ class Candidato:
     def es_la_misma(self, punto, separacion, holgura=1.0):
         """Si una propuesta nueva es la pareja que ya se esta midiendo.
 
-        Con holgura>1 la pregunta es otra y mas floja: "sera LA MISMA PAREJA,
-        aunque haya salido unos pixeles corrida?". Esa se usa solo para contar
-        cuantas veces la ha visto la busqueda, no para tocarle el sitio.
+        El margen es el temblor de la busqueda, que trabaja sobre el cuadro
+        reducido: un pixel suyo son tres del original. Dentro del margen la
+        propuesta se descarta y la pareja no se mueve -mover los recuadros a
+        media medicion mete un escalon de brillo en la trama-; fuera, entra
+        como pareja nueva y que decida el CRC.
 
-        El margen es el temblor de la busqueda: trabaja sobre el cuadro
-        reducido, asi que un pixel suyo son tres del original y dos busquedas
-        seguidas sobre una camara quieta ya difieren en dos o tres pixeles.
-
-        Dentro del margen la propuesta se descarta y la pareja se queda donde
-        estaba; fuera, entra como una pareja nueva y la vieja sigue midiendo
-        por su cuenta. Mover los recuadros a media medicion mete un escalon de
-        brillo en mitad de la trama, y sale mas barato tener dos parejas casi
-        iguales y dejar que decida el CRC.
+        Con holgura>1 la pregunta es mas floja ("sera la misma aunque salga
+        corrida?") y solo sirve para contar avistamientos.
         """
         cerca = max(8.0, 3.0 * self.escala) * holgura
         return (math.hypot(punto[0] - self.punto[0],
@@ -1140,8 +1251,9 @@ class Candidato:
         caja = ((x0 - origen[0]) / escala, (y0 - origen[1]) / escala,
                 w / escala, h / escala)
         for t, g in recientes:
-            ra, rb = self._recorte(g, pa, d), self._recorte(g, pb, d)
-            ventana = self._ventana(g, caja)
+            ra = recorte_centrado(g, pa, d)
+            rb = recorte_centrado(g, pb, d)
+            ventana = recorte_caja(g, caja)
             self.ba.append(brillo_de(ra))
             self.bb.append(brillo_de(rb))
             self.sa.append(saturados(ra))
@@ -1162,13 +1274,13 @@ class Candidato:
         # fallara a medio camino, las cuatro series quedarian con largos
         # distintos y a partir de ahi el brillo de A no seria del mismo cuadro
         # que el de B
-        ra = self._recorte(f, self.punto, self.lado)
-        rb = self._recorte(f, self.punto + self.separacion, self.lado)
+        ra = recorte_centrado(f, self.punto, self.lado)
+        rb = recorte_centrado(f, self.punto + self.separacion, self.lado)
         a, b = brillo_de(ra), brillo_de(rb)
         sa, sb = saturados(ra), saturados(rb)
         # para el modo por color hacen falta las DOS en el mismo recuadro: el
         # croma no dice cual esta prendida si cada una se mide por separado
-        l, c = (lum_y_croma(self._ventana(f, self.roi())) if self.con_color
+        l, c = (lum_y_croma(recorte_caja(f, self.roi())) if self.con_color
                 else (0.0, 0.0))
         self.ba.append(a)
         self.bb.append(b)
@@ -1185,26 +1297,6 @@ class Candidato:
         if self.n % 30 == 0:
             self.actividad(fps)   # de paso deja apuntado el maximo
 
-    @staticmethod
-    def _recorte(f, centro, lado):
-        """El recuadro de una luz, siempre dentro de la imagen."""
-        alto, ancho = f.shape[:2]
-        d = int(np.clip(lado, 1, max(1, min(alto, ancho) // 2 - 1)))
-        x = int(np.clip(round(centro[0]), d, ancho - d - 1))
-        y = int(np.clip(round(centro[1]), d, alto - d - 1))
-        return np.ascontiguousarray(f[y - d:y + d, x - d:x + d])
-
-    @staticmethod
-    def _ventana(f, caja):
-        """Un recuadro cualquiera, recortado a lo que hay de imagen."""
-        alto, ancho = f.shape[:2]
-        x0, y0, w, h = caja
-        x0 = int(np.clip(x0, 0, max(0, ancho - 6)))
-        y0 = int(np.clip(y0, 0, max(0, alto - 6)))
-        x1 = int(np.clip(x0 + w, x0 + 6, ancho))
-        y1 = int(np.clip(y0 + h, y0 + 6, alto))
-        return np.ascontiguousarray(f[y0:y1, x0:x1])
-
     # --- que tan prometedora es -----------------------------------------
     def actividad(self, fps):
         """Cambios por segundo que PODRIAN ser simbolos, en el ultimo rato.
@@ -1213,7 +1305,7 @@ class Candidato:
         como 7-14 cambios/s) de un reflejo o de alguien caminando por detras, y
         decide a cual se mira primero y cual sobra si hay que soltar una.
 
-        Lo de "podrian ser" no es un adorno. Contar cambios a secas premia justo
+        Lo de "podrian ser" no es un adorno: contar cambios a secas premia
         al ruido: un reflejo en el marco de una ventana daba 25 y hasta 52
         cambios/s y se quedaba con las plazas mientras la pareja buena, que
         daba 10, no entraba nunca. Pero por encima de fps/3 no hay simbolo que
@@ -1224,49 +1316,42 @@ class Candidato:
         n = int(min(len(self.t), max(60, 4 * fps)))
         if n < 30:
             return 0.0
-        # Cambios del ESTADO CONJUNTO, no de cada luz por separado sumados:
-        # con codigo por transicion el estado conjunto cambia una vez por
-        # simbolo, asi que esta cuenta ES la velocidad y el techo fisico se le
-        # aplica tal cual. Sumando las dos salia el doble y a 30 fps una señal
-        # buena de 7 sim/s marcaba 14 y se descartaba por ruido.
+        # Cambios del ESTADO CONJUNTO, no de cada luz sumados: con codigo por
+        # transicion el conjunto cambia una vez por simbolo, asi que esta
+        # cuenta ES la velocidad y el techo fisico se le aplica tal cual.
         estado = np.zeros(n, dtype=np.int16)
         vivo = False
-        series = (((self.ba, 1), (self.bb, 2)) if self.separadas
-                  else ((self.lum, 1),))
+        series = (((self.ba, LUZ_A), (self.bb, LUZ_B)) if self.separadas
+                  else ((self.lum, LUZ_A),))
         for serie, peso in series:
             v = np.asarray(serie[-n:])
-            p10, p90 = np.percentile(v, 10), np.percentile(v, 90)
-            if p90 - p10 < 4:
+            p10, p90 = recorrido(v)
+            if not hay_cambio(p10, p90):
                 continue                # esa luz no cambia en este rato
             vivo = True
-            estado += peso * (v >= p10 + 0.45 * (p90 - p10))
+            estado += peso * encendida(v, p10, p90)
         if not vivo:
             return 0.0
         cambios = int(np.count_nonzero(estado[1:] != estado[:-1]))
         tasa = cambios / max(1e-6, self.t[-1] - self.t[-n])
         if tasa > fps / CUADROS_POR_SIMBOLO_MIN:
-            return 0.0                  # mas rapido que el limite fisico: ruido
+            return 0.0                 # mas rapido que el limite: es ruido
         self.mejor = max(self.mejor, tasa)
         return tasa
 
     def puntaje(self, fps, ahora):
-        """Lo que vale esta pareja: (en cuantas busquedas salio, cuanto parpadea).
+        """(avistamientos, parpadeo, edad) para ordenar y para desempatar.
 
-        Manda la CONSTANCIA porque la velocidad no separa: al aire libre las
-        hojas de un arbol parpadean a 9 o 10 cambios por segundo, lo mismo que
-        las luces. Lo que si las separa es que la pareja buena vuelve a salir
-        busqueda tras busqueda en el mismo sitio, y una sombra entre las hojas
-        sale una vez y no vuelve.
+        Manda la CONSTANCIA, no la velocidad: al aire libre las hojas de un
+        arbol parpadean a 9 o 10 cambios/s, igual que las luces, pero la
+        pareja buena vuelve a salir busqueda tras busqueda en el mismo sitio y
+        una sombra entre las hojas sale una vez y no vuelve.
 
-        Desempata el parpadeo mas vivo que se le ha visto, no el de ahora
-        mismo: entre dos copias del bloque las luces se quedan quietas. A la
-        recien nacida se le da margen un par de segundos, que todavia no ha
-        tenido ocasion de enseñar nada.
+        Desempata el parpadeo MAS VIVO que se le ha visto, no el de ahora
+        mismo, porque entre dos copias del bloque las luces se quedan quietas.
+        Y luego la edad: sin eso, al principio todas valen (1, algo) y cada
+        busqueda echaria a la mas vieja, que es la que mas ha probado.
         """
-        # El tercer valor desempata por EDAD, y hace falta: al principio todas
-        # valen (1, algo), y si el desempate fuera el orden de la lista cada
-        # busqueda echaria a la mas vieja y ninguna llegaria a que la vieran dos
-        # veces. Se sueltan las mas nuevas, que son las que menos han probado.
         if self.protegida:
             return (10 ** 6, 0.0, 0.0)
         if ahora - self.nacido < 2.0:
@@ -1279,10 +1364,15 @@ class Candidato:
         if len(self.t) < n:
             return False
         for serie in (self.ba, self.bb, self.lum):
-            v = np.asarray(serie[-n:])
-            if np.percentile(v, 90) - np.percentile(v, 10) >= 4:
+            if hay_cambio(*recorrido(serie[-n:])):
                 return False
         return True
+
+
+# ----------------------------------- 4.2 de lo medido al bloque -----------
+#
+# Aqui ya no hay pixeles: entran series de numeros y sale un bloque de celdas.
+# Lo comparten el camino de archivo y el de la camara en vivo.
 
 
 def fraccion_recibida(info):
@@ -1299,7 +1389,8 @@ def fraccion_recibida(info):
     return min(len(info.get("payload", "")), nbits) / float(nbits)
 
 
-def probar_velocidades(tiempos, estados, fps, simbolos_por_s=None, avisar=None):
+def probar_velocidades(tiempos, estados, fps, simbolos_por_s=None,
+                       avisar=None):
     """Prueba velocidades sobre UNA traza de estados y devuelve lo mejor.
 
     Es el bucle interior que comparten los dos caminos, el de archivo y el de
@@ -1319,8 +1410,8 @@ def probar_velocidades(tiempos, estados, fps, simbolos_por_s=None, avisar=None):
     if medida is not None and confianza >= 0.25:
         velocidades.append(medida)
     techo = fps / CUADROS_POR_SIMBOLO_MIN
-    velocidades += [v for v in VELOCIDADES_TIPICAS
-                    if v <= techo and all(abs(v - u) > 0.2 for u in velocidades)]
+    velocidades += [v for v in VELOCIDADES_TIPICAS if v <= techo
+                    and all(abs(v - u) > 0.2 for u in velocidades)]
 
     # Si ninguna cuadra el CRC se devuelve la PRIMERA que dio algo, o sea la de
     # la velocidad medida sobre la señal. Aqui no vale quedarse con la que
@@ -1339,7 +1430,77 @@ def probar_velocidades(tiempos, estados, fps, simbolos_por_s=None, avisar=None):
     return None, None, None, medida
 
 
-# ------------------------------------------------------- un archivo -------
+# Las tres maneras de sacar el estado de las luces de lo medido, en el orden
+# en que se prueban. La primera es la que mas manda de dia y la ultima la unica
+# que sirve cuando las dos luces caen en el mismo punto de la imagen.
+LECTURAS = (
+    ("quemados", lambda l: clasificar_por_posicion(l.quemados_a, l.quemados_b),
+     lambda l: l.separadas),
+    ("brillo", lambda l: clasificar_por_posicion(l.brillo_a, l.brillo_b),
+     lambda l: l.separadas),
+    ("color", lambda l: clasificar_por_color(l.lum, l.croma),
+     lambda l: l.con_color),
+)
+
+MUESTRAS_MINIMAS = 60
+
+
+def descifrar_medidas(lecturas, fps, simbolos_por_s=None, avisar=None):
+    """De las series medidas sale el bloque. Aqui ya no hay pixeles.
+
+    Se prueban TODAS las parejas con una manera de leerlas antes de pasar a la
+    siguiente, y no al reves: lo normal es que cuadre en la primera vuelta, y
+    asi el caso normal no paga las otras dos.
+
+    Lo usan los dos caminos, el de archivo y el de la camara.
+    """
+    if not lecturas:
+        return None, "ninguna pareja parpadea como una señal: nadie transmite"
+    largo = max(len(l) for l in lecturas)
+    if largo < MUESTRAS_MINIMAS:
+        return None, "juntando cuadros..."
+
+    mejor = None
+    for modo, sacar_estados, aplica in LECTURAS:
+        for lectura in lecturas:
+            if len(lectura) < MUESTRAS_MINIMAS or not aplica(lectura):
+                continue
+            estados = sacar_estados(lectura)
+            if not estados:
+                continue
+            decir = None
+            if avisar:
+                decir = lambda m, e=lectura.etiqueta, o=modo: avisar(
+                    "por %-8s en %-22s velocidad medida %s"
+                    % (o, e, "%.2f sim/s" % m if m else "no medible"))
+            info, nota, sps, _ = probar_velocidades(
+                lectura.t, estados, fps, simbolos_por_s, avisar=decir)
+            if info is None:
+                continue
+            texto = "%s  (por %s en %s, %.2f sim/s)" % (
+                nota, modo, lectura.etiqueta, sps)
+            if info.get("crc_ok"):
+                if fps / sps < CUADROS_POR_SIMBOLO_MIN:
+                    texto += "  [ojo: solo %.1f cuadros/simbolo]" % (fps / sps)
+                return info, texto
+            # Entre PAREJAS distintas si vale quedarse con la que mas trajo:
+            # ahi no se esta cambiando el reloj, se esta midiendo otra cosa.
+            if (mejor is None or
+                    fraccion_recibida(info) > fraccion_recibida(mejor[0])):
+                mejor = (info, texto)
+    if mejor:
+        return mejor
+    return None, "nada cuadra todavia: %d cuadros a %.0f fps" % (largo, fps)
+
+
+# ---------------------------------------- 4.3 un archivo de video ---------
+#
+# Tres pasos -buscar, medir, descifrar- y ni una imagen guardada de uno al
+# siguiente. La pasada de medida es UNA y mide todas las parejas candidatas a
+# la vez: un recuadro de 30x30 px cuesta microsegundos, asi que ocho parejas
+# valen casi lo mismo que una.
+
+
 #
 # Tres pasos y ni una imagen guardada de uno al siguiente. La pasada de medida
 # es UNA y mide todas las parejas candidatas a la vez, sobre el cuadro sin
@@ -1418,8 +1579,8 @@ def tramos_de_video(cap, tramos, largo, zona=None):
     for i0 in range(0, max(1, total - largo), paso):
         # Se avanza con grab(), que descomprime el cuadro pero no lo convierte
         # ni lo entrega. Salta a lo que hay entre tramo y tramo por la mitad de
-        # precio, y ademas sin usar cap.set(), que en un mp4 tiene que retroceder
-        # al fotograma clave anterior y volver a decodificar desde ahi.
+        # precio, y sin usar cap.set(), que en un mp4 tiene que retroceder al
+        # fotograma clave anterior y decodificar otra vez desde ahi.
         while i < i0:
             if not cap.grab():
                 return
@@ -1430,19 +1591,8 @@ def tramos_de_video(cap, tramos, largo, zona=None):
             i += 1
             if not ok:
                 break
-            g = f
-            if zona:
-                x, y, w, h = (int(v) for v in zona)
-                x, y = max(0, x), max(0, y)
-                recorte = f[y:y + h, x:x + w]
-                if recorte.shape[0] > 16 and recorte.shape[1] > 16:
-                    g, origen = recorte, (float(x), float(y))
-            esc = min(1.0, float(ANCHO_BUSQUEDA) / g.shape[1])
-            escala = 1.0 / esc
-            if esc < 1.0:
-                g = cv2.resize(g, None, fx=esc, fy=esc)
-            bloque.append(cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
-                          if g.ndim == 3 else g.copy())
+            g, escala, origen = reducir_para_buscar(f, zona)
+            bloque.append(g)
         if len(bloque) >= 20:
             yield i0, bloque, escala, origen
 
@@ -1474,11 +1624,8 @@ def buscar_luces_en_video(ruta, zona=None, tramos=TRAMOS_BUSQUEDA,
                 bloque, fps, escala, origen, cuantas=3):
             centro = i0 + len(bloque) / 2.0
             for g in grupos:
-                misma_sep = math.hypot(separacion[0] - g["sep"][0],
-                                       separacion[1] - g["sep"][1]) < 14
-                cerca = math.hypot(punto[0] - g["anclas"][-1][1][0],
-                                   punto[1] - g["anclas"][-1][1][1]) < 90
-                if misma_sep and cerca:
+                if misma_pareja(punto, separacion,
+                                g["anclas"][-1][1], g["sep"]):
                     g["anclas"].append((centro, punto))
                     g["seps"].append(separacion)
                     g["veces"] += 1
@@ -1546,9 +1693,8 @@ def medir_en_video(ruta, parejas, avisar=None, con_color=False):
         return [], 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    # cuanto se redujo el cuadro para buscar: de ahi sale el tamaño del recuadro
-    # cuando las dos luces vienen fundidas en un punto y no hay separacion que
-    # mande
+    # cuanto se redujo el cuadro para buscar: de ahi sale el lado del recuadro
+    # cuando las luces vienen fundidas y no hay separacion que mande
     escala = max(1.0, (cap.get(cv2.CAP_PROP_FRAME_WIDTH) or ANCHO_BUSQUEDA)
                  / float(ANCHO_BUSQUEDA))
 
@@ -1556,8 +1702,8 @@ def medir_en_video(ruta, parejas, avisar=None, con_color=False):
     separadas = 0
     for punto, separacion, anclas in parejas:
         camino, quieta = trayectoria_de(anclas, max(total, 1))
-        # color para las que se ven fundidas en un punto, que es donde es la
-        # UNICA manera, y para las dos primeras separadas, como red de seguridad
+        # color para las fundidas en un punto, que es donde es la UNICA
+        # manera, y para las dos primeras separadas, como red de seguridad
         fundidas = not np.any(separacion)
         mide_color = con_color and (fundidas or separadas < 3)
         separadas += 0 if fundidas else 1
@@ -1613,7 +1759,8 @@ def seleccionar_zona_video(ruta):
 
     esc = min(1.0, 900.0 / cuadro.shape[1])
     vista = cv2.resize(cuadro, None, fx=esc, fy=esc)
-    cv2.putText(vista, "Encierra las dos luces y pulsa Enter;  C = buscarlas solo",
+    cv2.putText(vista, "Encierra las dos luces y pulsa Enter;  "
+                       "C = buscarlas solo",
                 (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (0, 255, 255), 1, cv2.LINE_AA)
     cv2.namedWindow("donde estan las luces", cv2.WINDOW_NORMAL)
@@ -1624,8 +1771,11 @@ def seleccionar_zona_video(ruta):
         return None
     # un poco de margen: la caja se mueve y las luces tienen halo
     margen = int(0.15 * max(w, h))
-    return (int(round((x - margen) / esc)), int(round((y - margen) / esc)),
-            int(round((w + 2 * margen) / esc)), int(round((h + 2 * margen) / esc)))
+    def original(v):
+        return int(round(v / esc))
+
+    return (original(x - margen), original(y - margen),
+            original(w + 2 * margen), original(h + 2 * margen))
 
 
 def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
@@ -1635,17 +1785,18 @@ def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
     veces y no se carga la pelicula en memoria.
     """
     aviso = (lambda m: print("   " + m)) if verboso else None
-    avance = (lambda p: print("   %3.0f%%" % (p * 100), end="\r")) if verboso else None
+    avance = ((lambda p: print("   %3.0f%%" % (p * 100), end="\r"))
+              if verboso else None)
 
     if verboso:
         print("Buscando las luces%s..."
               % (" dentro del recuadro" if zona else " en todo el cuadro"))
     parejas = buscar_luces_en_video(ruta, zona, avisar=aviso)
     if not parejas:
-        return (None, "no se ve ninguna pareja de luces que parpadee entre 2 y "
-                "25 Hz. Si estan muy lejos se funden en un punto y hay que "
-                "acercarse o hacer zoom; si hay muchas cosas moviendose, marcar "
-                "a mano donde esta la caja ayuda.", None, 1.0)
+        return (None, "no se ve ninguna pareja de luces que parpadee entre 2 "
+                "y 25 Hz. Si estan muy lejos se funden en un punto y hay que "
+                "acercarse o hacer zoom; si hay muchas cosas moviendose, "
+                "marcar a mano donde esta la caja ayuda.", None, 1.0)
 
     if verboso:
         print("Midiendo las %d parejas de una pasada..." % len(parejas))
@@ -1654,7 +1805,8 @@ def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
         return None, "no se pudo leer el video", None, 1.0
 
     if verboso:
-        print("   %d cuadros, %.2f fps efectivos" % (len(candidatos[0].t), fps))
+        print("   %d cuadros, %.2f fps efectivos"
+              % (len(candidatos[0].t), fps))
         print("Descifrando...")
     info, nota = descifrar_medidas([c.lectura() for c in candidatos],
                                    fps, simbolos_por_s, avisar=aviso)
@@ -1673,8 +1825,9 @@ def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
             info2, nota2 = descifrar_medidas(
                 [c.lectura() for c in en_color], fps2, simbolos_por_s,
                 avisar=aviso)
-            if info2 is not None and (info is None or info2.get("crc_ok") or
-                                      fraccion_recibida(info2) > fraccion_recibida(info)):
+            mejora = (info is None or info2.get("crc_ok") or
+                      fraccion_recibida(info2) > fraccion_recibida(info))
+            if info2 is not None and mejora:
                 info, nota, candidatos = info2, nota2, en_color
 
     roi = None
@@ -1687,13 +1840,15 @@ def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
     if info is None:
         nota += ("\n              El video tiene %.1f fps, o sea un techo de "
                  "~%.0f simbolos/s: por encima de eso hay que grabar a 60."
-                 "\n              Y si la camara iba EN LA MANO, este receptor "
-                 "no es el que toca, porque mide en recuadros quietos. Para "
-                 "esas tomas esta rx_camara_con_seguimiento.py, al lado de este "
-                 "archivo, que sigue las luces cuadro a cuadro (y tarda mucho "
-                 "mas)." % (fps, fps / CUADROS_POR_SIMBOLO_MIN))
+                 "\n              Y si la camara iba EN LA MANO, este no es "
+                 "el receptor que toca, porque mide en recuadros quietos. "
+                 "Para esas tomas esta rx_camara_con_seguimiento.py, al lado "
+                 "de este archivo, que sigue las luces cuadro a cuadro (y "
+                 "tarda mucho mas)." % (fps, fps / CUADROS_POR_SIMBOLO_MIN))
     return grid, nota, roi, 1.0
 
+
+# ------------------------------------------- 4.4 abrir la camara ----------
 
 def abrir_camara(cual, fps_pedidos=FPS_CAMARA, exposicion=EXPOSICION_CAMARA):
     """Abre una camara por indice (0, 1, ...) o por URL, y la deja lista.
@@ -1734,15 +1889,9 @@ def abrir_camara(cual, fps_pedidos=FPS_CAMARA, exposicion=EXPOSICION_CAMARA):
 def nombres_camaras(hasta=8):
     """Los NOMBRES de las camaras del PC, los mismos que muestra Zoom o Meet.
 
-    OpenCV no sabe los nombres: solo abre camaras por numero, y por eso este
-    programa usaba siempre la 0 (la del portatil). Los nombres los tiene
-    DirectShow, que es de donde los sacan Zoom, Meet o Teams, y en Windows se
-    leen con pygrabber:
-
-        pip install pygrabber
-
-    Sin pygrabber esto devuelve [] y el programa cae a mostrar las camaras por
-    numero, que sigue funcionando pero obliga a adivinar cual es cual.
+    OpenCV solo las abre por numero; los nombres los tiene DirectShow y en
+    Windows se leen con pygrabber (pip install pygrabber). Sin el devuelve []
+    y hay que elegir la camara por numero.
     """
     try:
         from pygrabber.dshow_graph import FilterGraph
@@ -1752,7 +1901,7 @@ def nombres_camaras(hasta=8):
 
 
 def camaras_disponibles(hasta=6):
-    """Que camaras responden de verdad. [(indice, nombre, ancho, alto, brillo)].
+    """Las camaras que responden: [(indice, nombre, ancho, alto, brillo)].
 
     Abrir cada camara tarda un segundo largo, asi que esto es para --camaras y
     para cuando no hay nombres. Para solo escoger, nombres_camaras() basta y es
@@ -1797,7 +1946,7 @@ def resolver_camara(valor):
     return texto
 
 
-# ------------------------------------------------- la camara en vivo ------
+# ---------------------------------------------- 4.5 la camara en vivo -----
 #
 # Un archivo se puede releer entero; en vivo cada cuadro pasa una vez. Por eso
 # el rastreador no guarda imagenes: busca las luces sobre cuadros reducidos y
@@ -1871,12 +2020,11 @@ class RastreadorVivo:
     def tarea_de_descifrado(self, fps, simbolos_por_s):
         """Lo que se le manda al hilo que descifra, ya copiado y ordenado.
 
-        Se dejan fuera las parejas a las que NUNCA se les ha visto un parpadeo
-        que pudiera ser de simbolos. No es un atajo dudoso: si esa pareja no ha
-        cambiado a un ritmo posible, no hay trama ahi que sacar. Y es lo que
-        hace que la escucha no queme el procesador mientras no transmite nadie,
-        que es la mayor parte del tiempo. A las recien nacidas se les da margen,
-        que todavia no han tenido ocasion de enseñar nada.
+        Quedan fuera las parejas a las que nunca se les vio un parpadeo que
+        pudiera ser de simbolos: si no ha cambiado a un ritmo posible, no hay
+        trama que sacar. Es lo que evita quemar el procesador mientras no
+        transmite nadie. Las recien nacidas pasan igual, que aun no han tenido
+        ocasion de enseñar nada.
         """
         ahora = max((c.t[-1] for c in self.candidatos if c.t), default=0.0)
         vivas = [c for c in self.candidatos
@@ -1926,34 +2074,24 @@ class RastreadorVivo:
             self.candidatos.remove(min(viejas,
                                        key=lambda c: c.puntaje(fps, ahora)))
 
-    def proteger(self, etiqueta):
-        """Marca como intocable la pareja que ya dio una cabecera valida.
+    def proteger(self, nota):
+        """Deja intocable la pareja que firma 'nota', ya no se suelta.
 
-        Es la unica realimentacion que hay entre descifrar y buscar, y hace
-        falta: al aire libre las hojas de un arbol parpadean a la misma
-        velocidad que las luces y le ganaban el puesto a la pareja buena una y
-        otra vez. Que una pareja haya llegado a dar una cabecera con su CRC-8
-        bueno no es casualidad -son 24 bits cuadrando- y a partir de ahi no hay
-        nada que la busqueda pueda proponer que valga mas.
+        Unica realimentacion entre descifrar y buscar, y hace falta: al aire
+        libre las hojas de un arbol parpadean igual de rapido y le ganaban el
+        puesto. Una cabecera con su CRC-8 bueno son 24 bits cuadrando, asi que
+        no hay nada que la busqueda pueda proponer que valga mas.
         """
         for c in self.candidatos:
-            if c.etiqueta() == etiqueta:
+            if c.etiqueta() in nota:
                 c.protegida = True
                 return True
         return False
 
     def _apuntar_vista(self, punto, separacion):
-        """Suma uno al contador de esta pareja y devuelve cuantas van.
-
-        La vara es ancha (la separacion es lo que de verdad identifica a la
-        pareja; el punto puede bailar unos pixeles porque la busqueda trabaja
-        sobre el cuadro reducido).
-        """
+        """Suma uno al contador de esta pareja y devuelve cuantas van."""
         for v in self.vistas:
-            if (math.hypot(separacion[0] - v["sep"][0],
-                           separacion[1] - v["sep"][1]) < 14 and
-                    math.hypot(punto[0] - v["punto"][0],
-                               punto[1] - v["punto"][1]) < 90):
+            if misma_pareja(punto, separacion, v["punto"], v["sep"]):
                 v["veces"] += 1
                 v["punto"] = punto
                 return v["veces"]
@@ -1996,102 +2134,20 @@ class RastreadorVivo:
         if not buscar_mas:
             self.buscando = []
             return
-        self.buscando.append((t, self._reducir(f)))
+        # el anillo va en gris: se pierde el croma de los segundos
+        # precargados, que solo hace falta con las luces fundidas en un punto
+        gris, self.escala, self.origen = reducir_para_buscar(f, self.zona)
+        self.buscando.append((t, gris))
         if len(self.buscando) > CUADROS_BUSQUEDA + CUADROS_PRECARGA_VIVO:
             self.buscando.pop(0)
-
-    def _reducir(self, f):
-        """El cuadro como se usa para BUSCAR y para PRECARGAR: recortado a la
-        zona, reducido y en gris.
-
-        En gris porque las dos cosas que se hacen con el -el mapa de parpadeo y
-        el brillo de cada luz- solo miran la luminancia. Lo unico que se pierde
-        es el croma de los segundos precargados, que solo hace falta cuando las
-        luces se ven FUNDIDAS en un punto; en ese caso la precarga entra con
-        croma cero y el modo por color arranca de verdad unos segundos despues.
-        """
-        g, self.origen = f, (0.0, 0.0)
-        if self.zona:
-            x, y, w, h = self.zona
-            x, y = max(0, int(x)), max(0, int(y))
-            recorte = f[y:y + int(h), x:x + int(w)]
-            if recorte.shape[0] > 16 and recorte.shape[1] > 16:
-                g, self.origen = recorte, (float(x), float(y))
-        esc = min(1.0, float(ANCHO_BUSQUEDA) / g.shape[1])
-        self.escala = 1.0 / esc
-        if esc < 1.0:
-            g = cv2.resize(g, None, fx=esc, fy=esc)
-        return cv2.cvtColor(g, cv2.COLOR_BGR2GRAY) if g.ndim == 3 else g.copy()
-
-
-# Las tres maneras de sacar el estado de las luces de lo medido, en el orden
-# en que se prueban. La primera es la que mas manda de dia y la ultima la unica
-# que sirve cuando las dos luces caen en el mismo punto de la imagen.
-LECTURAS = (
-    ("quemados", lambda l: clasificar_por_posicion(l.quemados_a, l.quemados_b),
-     lambda l: l.separadas),
-    ("brillo", lambda l: clasificar_por_posicion(l.brillo_a, l.brillo_b),
-     lambda l: l.separadas),
-    ("color", lambda l: clasificar_por_color(l.lum, l.croma),
-     lambda l: l.con_color),
-)
-
-MUESTRAS_MINIMAS = 60
-
-
-def descifrar_medidas(lecturas, fps, simbolos_por_s=None, avisar=None):
-    """De las series medidas sale el bloque. Aqui ya no hay pixeles.
-
-    Se prueban TODAS las parejas con una manera de leerlas antes de pasar a la
-    siguiente, y no al reves: lo normal es que cuadre en la primera vuelta, y
-    asi el caso normal no paga las otras dos.
-
-    Lo usan los dos caminos, el de archivo y el de la camara.
-    """
-    if not lecturas:
-        return None, "ninguna pareja parpadea como una señal: nadie transmite"
-    largo = max(len(l) for l in lecturas)
-    if largo < MUESTRAS_MINIMAS:
-        return None, "juntando cuadros..."
-
-    mejor = None
-    for modo, sacar_estados, aplica in LECTURAS:
-        for lectura in lecturas:
-            if len(lectura) < MUESTRAS_MINIMAS or not aplica(lectura):
-                continue
-            estados = sacar_estados(lectura)
-            if not estados:
-                continue
-            decir = None
-            if avisar:
-                decir = lambda m, e=lectura.etiqueta, o=modo: avisar(
-                    "por %-8s en %-22s velocidad medida %s"
-                    % (o, e, "%.2f sim/s" % m if m else "no medible"))
-            info, nota, sps, _ = probar_velocidades(
-                lectura.t, estados, fps, simbolos_por_s, avisar=decir)
-            if info is None:
-                continue
-            texto = "%s  (por %s en %s, %.2f sim/s)" % (
-                nota, modo, lectura.etiqueta, sps)
-            if info.get("crc_ok"):
-                if fps / sps < CUADROS_POR_SIMBOLO_MIN:
-                    texto += "  [ojo: solo %.1f cuadros/simbolo]" % (fps / sps)
-                return info, texto
-            # Entre PAREJAS distintas si vale quedarse con la que mas trajo:
-            # ahi no se esta cambiando el reloj, se esta midiendo otra cosa.
-            if mejor is None or fraccion_recibida(info) > fraccion_recibida(mejor[0]):
-                mejor = (info, texto)
-    if mejor:
-        return mejor
-    return None, "nada cuadra todavia: %d cuadros a %.0f fps" % (largo, fps)
 
 
 class TareaEnHilo(threading.Thread):
     """Corre una tarea aparte para que la ventana nunca se congele.
 
     ESTE HILO ES EL ARREGLO de que la tecla 'q' no respondiera en vivo: buscar
-    las luces y descifrar tardan lo suyo, y hacerlo en el mismo bucle que dibuja
-    dejaba la ventana bloqueada mas de la mitad del tiempo, asi que cv2.waitKey
+    las luces y descifrar tardan lo suyo, y hacerlo en el bucle que dibuja
+    dejaba la ventana bloqueada mas de la mitad del tiempo, asi que waitKey
     casi nunca veia la tecla. Aqui el bucle solo lanza la tarea y sigue
     dibujando; cuando termina, deja el resultado en .salida.
     """
@@ -2116,7 +2172,8 @@ VENTANA_FPS = 150
 
 
 class EscuchaEnVivo:
-    """El estado de una escucha: lo medido, lo descifrado y lo que corre aparte.
+    """El estado de una escucha: lo medido, lo descifrado y lo que corre
+    en otro hilo.
 
     Esta separado del bucle que lee la camara porque son dos cosas distintas:
     el bucle se ocupa de la captura (abrirla, leerla, la exposicion) y esta
@@ -2148,7 +2205,7 @@ class EscuchaEnVivo:
 
     # --- lo que se hace con cada cuadro ---------------------------------
     def procesar(self, cuadro, t):
-        """Mide el cuadro, recoge lo que dejaron los hilos y lanza lo siguiente."""
+        """Mide el cuadro, recoge lo de los hilos y lanza lo siguiente."""
         self._actualizar_fps(t)
         self.rastreador.alimentar(cuadro, t, self.fps,
                                   buscar_mas=not self.congelado)
@@ -2177,7 +2234,7 @@ class EscuchaEnVivo:
             self.rastreador.sembrar(hilo.salida, self.fps,
                                     self.rastreador.reloj)
         elif not self.rastreador.enganchado:
-            self.rastreador.nota = ("no se ve nada parpadeando: acercate o haz "
+            self.rastreador.nota = ("no se ve nada parpadeando: acercate o "
                                     "zoom (m limita la busqueda)")
 
     def _recoger_descifrado(self):
@@ -2193,13 +2250,7 @@ class EscuchaEnVivo:
         info, self.nota = hilo.salida
         if not (info and info.get("cabecera_ok")):
             return
-        # La pareja que lo consiguio ya no se suelta: haber sacado una cabecera
-        # con su CRC-8 bueno son 24 bits cuadrando, y al aire libre las hojas de
-        # un arbol le ganaban el puesto por parpadear igual de rapido.
-        for c in self.rastreador.candidatos:
-            if c.etiqueta() in self.nota:
-                c.protegida = True
-                break
+        self.rastreador.proteger(self.nota)
         nuevo = a_cuadricula(info)
         if nuevo:
             self.grid = nuevo
@@ -2246,7 +2297,8 @@ class EscuchaEnVivo:
             # lo decide el rastreador y lo hace mejor que un rectangulo a pulso
             self.zona = respuesta["zona"]
             self._empezar_de_cero("buscando solo dentro del recuadro"
-                                  if self.zona else "buscando en todo el cuadro")
+                                  if self.zona
+                                  else "buscando en todo el cuadro")
         elif respuesta == "reiniciar":
             self._empezar_de_cero("escucha reiniciada")
 
@@ -2321,7 +2373,8 @@ def escuchar_camara(cual=CAMARA, simbolos_por_s=None, fps_pedidos=FPS_CAMARA,
             if al_actualizar is None:
                 continue
 
-            respuesta = al_actualizar(escucha.estado(cuadro, t, exposicion_actual))
+            respuesta = al_actualizar(
+                escucha.estado(cuadro, t, exposicion_actual))
             if respuesta is False:
                 break
             if isinstance(respuesta, dict) and "exposicion" in respuesta:
@@ -2342,7 +2395,8 @@ class CamaraDesdeVideo:
     Es lo unico que permite probar la escucha en vivo sin tener a alguien al
     otro lado encendiendo luces: entrega los cuadros de uno en uno y con el
     reloj DEL VIDEO, asi que el rastreador ve exactamente lo que veria en vivo
-    (no puede volver atras, no sabe cuanto falta, y los fps son los de la toma).
+    (no puede volver atras ni saber cuanto falta, y los fps son los de la
+    toma).
     """
 
     def __init__(self, ruta, tiempo_real=False):
@@ -2379,9 +2433,9 @@ def simular_vivo(ruta, simbolos_por_s=None, al_actualizar=None,
     """Pasa un video grabado por el camino de la CAMARA EN VIVO.
 
     Sirve para dos cosas: comprobar que la escucha funciona antes de tener el
-    montaje delante, y saber si un fallo en vivo es de la camara o del receptor.
+    montaje delante, y saber si un fallo en vivo es de la camara o de aqui.
     Con tiempo_real=True los cuadros salen a la velocidad de la toma, como
-    saldrian de una camara; sin el va tan rapido como pueda leer el archivo, que
+    saldrian de una camara; sin el va tan rapido como lea el archivo, que
     es lo comodo para probar.
     """
     fuente = CamaraDesdeVideo(ruta, tiempo_real)
@@ -2400,6 +2454,55 @@ def simular_vivo(ruta, simbolos_por_s=None, al_actualizar=None,
 
 EXT_VIDEO = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
 
+# Paleta de las dos ventanas, en un solo sitio: cambiar un color aqui las
+# cambia las dos. tkinter se importa dentro de cada funcion a proposito, para
+# que el resto del programa siga sirviendo en un equipo que no lo tenga.
+COLOR = {"fondo": "#1e1e2e", "hueco": "#181825", "texto": "#cdd6f4",
+         "titulo": "#89b4fa", "suave": "#a6adc8", "ok": "#a6e3a1",
+         "cancelar": "#f38ba8", "camara": "#f9e2af", "probar": "#f5c2e7"}
+
+
+def _rotulo(padre, texto, color="titulo", tam=10, negrita=True):
+    """Una etiqueta de las ventanas. Hay que empaquetarla al gusto."""
+    import tkinter as tk
+    fuente = ("Segoe UI", tam, "bold") if negrita else ("Segoe UI", tam)
+    return tk.Label(padre, text=texto, bg=COLOR["fondo"], fg=COLOR[color],
+                    font=fuente)
+
+
+def _listado(padre, fuente=9, **extra):
+    """El Listbox oscuro que usan las dos ventanas."""
+    import tkinter as tk
+    return tk.Listbox(padre, bg=COLOR["hueco"], fg=COLOR["texto"],
+                      selectbackground=COLOR["titulo"],
+                      selectforeground=COLOR["hueco"],
+                      font=("Consolas", fuente), activestyle="none",
+                      borderwidth=0, highlightthickness=0, **extra)
+
+
+def _botonera(padre, botones):
+    """Una fila de botones a partir de [(texto, funcion, color)]."""
+    import tkinter as tk
+    marco = tk.Frame(padre, bg=COLOR["fondo"])
+    marco.pack(fill="x", padx=12, pady=12)
+    for texto, orden, color in botones:
+        tk.Button(marco, text=texto, command=orden, bg=COLOR[color],
+                  fg=COLOR["hueco"], font=("Segoe UI", 9, "bold"),
+                  relief="flat", padx=12,
+                  pady=6).pack(side="left", padx=(0, 8))
+    return marco
+
+
+def _al_frente(win):
+    """La sube una vez y le quita el "siempre encima" enseguida.
+
+    Al darle al play la ventana nace detras del editor; dejarla fija delante
+    estorbaria luego a las ventanas de OpenCV.
+    """
+    win.lift()
+    win.attributes("-topmost", True)
+    win.after(300, lambda: win.attributes("-topmost", False))
+
 
 # Donde se guardan las ultimas carpetas usadas. En el perfil del usuario y no
 # junto al archivo, para que funcione aunque el programa este en una carpeta de
@@ -2408,7 +2511,7 @@ MEMORIA_CARPETAS = Path.home() / ".rx_camara_carpetas"
 
 
 def _recordar_carpeta(ruta):
-    """Apunta la carpeta de un video escogido a mano, para verla la proxima vez."""
+    """Apunta la carpeta de un video escogido a mano, para la proxima vez."""
     try:
         carpeta = str(Path(ruta).resolve().parent)
         previas = [l for l in _leer_carpetas_recordadas() if l != carpeta]
@@ -2500,28 +2603,25 @@ def _preguntar_cual_camara(padre=None):
     elegida = {"cual": None}
     win = tk.Toplevel(padre) if padre is not None else tk.Tk()
     win.title("Que camara uso?")
-    win.configure(bg="#1e1e2e")
+    win.configure(bg=COLOR["fondo"])
     win.geometry("560x360")
 
-    tk.Label(win, text="Camaras del PC (doble clic para usarla)",
-             bg="#1e1e2e", fg="#89b4fa",
-             font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+    _rotulo(win, "Camaras del PC (doble clic para usarla)").pack(
+        anchor="w", padx=12, pady=(12, 4))
 
-    lista = tk.Listbox(win, bg="#181825", fg="#cdd6f4",
-                       selectbackground="#89b4fa", selectforeground="#181825",
-                       font=("Consolas", 10), activestyle="none",
-                       borderwidth=0, highlightthickness=0)
+    lista = _listado(win, fuente=10)
     lista.pack(fill="both", expand=True, padx=12)
     for i, nombre in opciones:
         lista.insert("end", "  %d)  %s" % (i, nombre))
     lista.selection_set(0)
 
-    tk.Label(win, text="...o la direccion de una camara por red "
-                       "(IP Webcam, camara IP):",
-             bg="#1e1e2e", fg="#a6adc8",
-             font=("Segoe UI", 9)).pack(anchor="w", padx=12, pady=(10, 2))
-    url = tk.Entry(win, bg="#181825", fg="#cdd6f4", insertbackground="#cdd6f4",
-                   font=("Consolas", 9), relief="flat")
+    _rotulo(win, "...o la direccion de una camara por red "
+                 "(IP Webcam, camara IP):",
+            color="suave", tam=9, negrita=False).pack(
+        anchor="w", padx=12, pady=(10, 2))
+    url = tk.Entry(win, bg=COLOR["hueco"], fg=COLOR["texto"],
+                   insertbackground=COLOR["texto"], font=("Consolas", 9),
+                   relief="flat")
     url.pack(fill="x", padx=12)
 
     def usar(_=None):
@@ -2539,19 +2639,12 @@ def _preguntar_cual_camara(padre=None):
     lista.bind("<Return>", usar)
     url.bind("<Return>", usar)
 
-    botones = tk.Frame(win, bg="#1e1e2e")
-    botones.pack(fill="x", padx=12, pady=12)
-    for texto, orden, color in (("Usar esta camara", usar, "#a6e3a1"),
-                                ("Cancelar", win.destroy, "#f38ba8")):
-        tk.Button(botones, text=texto, command=orden, bg=color, fg="#181825",
-                  font=("Segoe UI", 9, "bold"), relief="flat",
-                  padx=12, pady=6).pack(side="left", padx=(0, 8))
+    _botonera(win, (("Usar esta camara", usar, "ok"),
+                    ("Cancelar", win.destroy, "cancelar")))
 
     win.bind("<Escape>", lambda _: win.destroy())
     lista.focus_set()
-    win.lift()
-    win.attributes("-topmost", True)
-    win.after(300, lambda: win.attributes("-topmost", False))
+    _al_frente(win)
     if padre is not None:
         win.transient(padre)
         win.grab_set()
@@ -2580,22 +2673,18 @@ def elegir_fuente():
     elegido = {"video": None, "camara": None, "simular": False}
     raiz = tk.Tk()
     raiz.title("Receptor por camara - que quieres analizar?")
-    raiz.configure(bg="#1e1e2e")
+    raiz.configure(bg=COLOR["fondo"])
     raiz.geometry("780x430")
 
-    tk.Label(raiz, text="Videos encontrados junto a este archivo "
-                        "(doble clic para descifrar)",
-             bg="#1e1e2e", fg="#89b4fa",
-             font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+    _rotulo(raiz, "Videos encontrados junto a este archivo "
+                  "(doble clic para descifrar)").pack(
+        anchor="w", padx=12, pady=(12, 4))
 
-    marco = tk.Frame(raiz, bg="#1e1e2e")
+    marco = tk.Frame(raiz, bg=COLOR["fondo"])
     marco.pack(fill="both", expand=True, padx=12)
     barra = tk.Scrollbar(marco)
     barra.pack(side="right", fill="y")
-    lista = tk.Listbox(marco, bg="#181825", fg="#cdd6f4",
-                       selectbackground="#89b4fa", selectforeground="#181825",
-                       font=("Consolas", 9), yscrollcommand=barra.set,
-                       activestyle="none", borderwidth=0, highlightthickness=0)
+    lista = _listado(marco, yscrollcommand=barra.set)
     lista.pack(side="left", fill="both", expand=True)
     barra.config(command=lista.yview)
 
@@ -2645,25 +2734,15 @@ def elegir_fuente():
     lista.bind("<Double-Button-1>", analizar)
     lista.bind("<Return>", analizar)
 
-    botones = tk.Frame(raiz, bg="#1e1e2e")
-    botones.pack(fill="x", padx=12, pady=12)
-    for texto, orden, color in (("Descifrar el seleccionado", analizar, "#a6e3a1"),
-                                ("Buscar otro archivo...", otro, "#89b4fa"),
-                                ("Camara en vivo", camara, "#f9e2af"),
-                                ("Probarlo como si fuera en vivo",
-                                 como_en_vivo, "#f5c2e7")):
-        tk.Button(botones, text=texto, command=orden, bg=color, fg="#181825",
-                  font=("Segoe UI", 9, "bold"), relief="flat",
-                  padx=12, pady=6).pack(side="left", padx=(0, 8))
+    _botonera(raiz, (
+        ("Descifrar el seleccionado", analizar, "ok"),
+        ("Buscar otro archivo...", otro, "titulo"),
+        ("Camara en vivo", camara, "camara"),
+        ("Probarlo como si fuera en vivo", como_en_vivo, "probar")))
 
     raiz.bind("<Escape>", lambda _: raiz.destroy())
     lista.focus_set()
-    # al darle al play la ventana nace detras del editor; se sube al frente una
-    # sola vez y se le quita el 'siempre encima' enseguida, para que despues no
-    # estorbe a las ventanas de OpenCV
-    raiz.lift()
-    raiz.attributes("-topmost", True)
-    raiz.after(300, lambda: raiz.attributes("-topmost", False))
+    _al_frente(raiz)
     raiz.mainloop()
     return elegido["video"], elegido["camara"], elegido["simular"]
 
@@ -2709,7 +2788,8 @@ def pintar_bloque(grid, ancho=620, alto=520, titulo=""):
     img = np.full((alto, ancho, 3), 24, np.uint8)
     if not grid:
         cv2.putText(img, "no se pudo descifrar", (20, alto // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 1,
+                    cv2.LINE_AA)
         cv2.putText(img, titulo[:70], (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (120, 160, 220), 1, cv2.LINE_AA)
         return img
@@ -2734,12 +2814,17 @@ def pintar_bloque(grid, ancho=620, alto=520, titulo=""):
                 # con la virgulilla encima, o saldria "??" en pantalla
                 letra = "N" if v == "Ñ" else v
                 esc = lado / 34.0
-                (tw, th), _ = cv2.getTextSize(letra, cv2.FONT_HERSHEY_SIMPLEX, esc, 2)
-                cv2.putText(img, letra, (x + (lado - tw) // 2, y + (lado + th) // 2),
-                            cv2.FONT_HERSHEY_SIMPLEX, esc, (0, 0, 0), 2, cv2.LINE_AA)
+                (tw, th), _ = cv2.getTextSize(
+                    letra, cv2.FONT_HERSHEY_SIMPLEX, esc, 2)
+                cv2.putText(img, letra,
+                            (x + (lado - tw) // 2, y + (lado + th) // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, esc, (0, 0, 0), 2,
+                            cv2.LINE_AA)
                 if v == "Ñ":
-                    cv2.putText(img, "~", (x + (lado - tw) // 2, y + th // 2 + 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, esc * 0.8, (0, 0, 0), 2)
+                    cv2.putText(img, "~",
+                                (x + (lado - tw) // 2, y + th // 2 + 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, esc * 0.8,
+                                (0, 0, 0), 2)
     cv2.putText(img, titulo[:70], (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.58,
                 (140, 230, 160) if "valido" in titulo else (140, 190, 240),
                 1, cv2.LINE_AA)
@@ -2771,7 +2856,8 @@ def mostrar_resultado(grid, nota, guardar=None):
     No se reproduce el video: el resultado ya esta calculado y lo unico que
     falta es verlo.
     """
-    titulo = nota if not grid else "%dx%d  -  %s" % (len(grid), len(grid[0]), nota)
+    titulo = (nota if not grid else
+              "%dx%d  -  %s" % (len(grid), len(grid[0]), nota))
     img = pintar_bloque(grid, titulo=titulo)
     if guardar:
         cv2.imwrite(guardar, pintar_bloque(grid, 900, 760, titulo))
@@ -2819,9 +2905,9 @@ def _pintar_camara(e):
     if e["zona"]:
         x, y, w, h = e["zona"]
         cv2.rectangle(vista, (x, y), (x + w, y + h), (0, 255, 255), 2)
-    # Se pintan todas las parejas que se estan midiendo, no solo la mejor: de un
-    # vistazo se ve por que no engancha (el recuadro sobre la persona que pasa
-    # canta enseguida). La primera es la que mas se parece a un transmisor.
+    # Se pintan TODAS las parejas que se miden, no solo la mejor: de un
+    # vistazo se ve por que no engancha (un recuadro sobre la persona que
+    # pasa canta enseguida). La primera es la que mas pinta de transmisor.
     for i, (x, y, w, h) in enumerate(e["rois"]):
         m = max(6, w // 3)
         color = ((0, 255, 0) if e["congelado"] else
@@ -2925,7 +3011,8 @@ def autoprueba():
     assert len(simbolos) == simbolos_necesarios(len(bits))
     # como lo veria una camara a 5 cuadros por simbolo
     vistos = [s for s in simbolos for _ in range(5)]
-    info2 = analizar_trama(decodificar_linea(simbolos_estables(vistos, 5.0))[0])
+    limpios = simbolos_estables(vistos, 5.0)
+    info2 = analizar_trama(decodificar_linea(limpios)[0])
     assert info2["crc_ok"] and a_cuadricula(info2) == grid
 
     # un bit corrompido tiene que caer en el CRC-16, pero la cabecera debe
@@ -2949,15 +3036,16 @@ def _argumentos():
     ap = argparse.ArgumentParser(
         description="Receptor por camara de dos luces. Sin argumentos "
                     "pregunta que video descifrar.")
-    ap.add_argument("--video", help="descifra este archivo y muestra el bloque")
+    ap.add_argument("--video",
+                    help="descifra este archivo y muestra el bloque")
     ap.add_argument("--simular-vivo", dest="simular_vivo",
                     help="pasa un video grabado por el camino de la CAMARA EN "
                          "VIVO, para probar la escucha sin montaje delante")
     ap.add_argument("--tiempo-real", dest="tiempo_real", action="store_true",
                     help="con --simular-vivo, entrega los cuadros a la "
-                         "velocidad de la toma en vez de lo mas rapido posible")
+                         "velocidad de la toma y no lo mas rapido posible")
     ap.add_argument("--camara", default=None,
-                    help="escucha en vivo: un numero (0 es la primera del PC), "
+                    help="escucha en vivo: un numero (0 es la primera), "
                          "parte del nombre de la camara, o una URL de "
                          "celular/camara IP")
     ap.add_argument("--exposicion", type=int, default=EXPOSICION_CAMARA,
