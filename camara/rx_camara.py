@@ -109,6 +109,19 @@ ANCHO_BUSQUEDA = 640
 # Cuadros seguidos para la FFT: 90 son 1,5 s a 60 fps.
 CUADROS_BUSQUEDA = 90
 
+# Fraccion de pixeles -los mas brillantes- sobre los que se calcula la FFT.
+#
+# El mapa acaba multiplicado por brillo^2, asi que todo lo oscuro sale cero de
+# todas formas: transformar solo lo que alumbra da EL MISMO resultado mucho mas
+# rapido. Medido sobre un tramo real de 90 cuadros de 640x360:
+#
+#       imagen entera (230.400 px)  1565 ms
+#       el 2% mas brillante          128 ms   <- picos identicos
+#
+# La busqueda era el 75% del tiempo de descifrar un archivo, asi que esto es lo
+# que mas se nota. Subirlo es mas seguro y mas lento; 1.0 lo desactiva.
+FRACCION_PIXELES_FFT = 0.02
+
 # Tramos del video de donde se sacan candidatas. Saltar de tramo en tramo es lo
 # que hace rapida la busqueda.
 TRAMOS_BUSQUEDA = 10
@@ -128,7 +141,32 @@ TOLERANCIA_PUNTO_PX = 90.0
 
 # --- MEDIR ----------------------------------------------------------------
 # A partir de que valor un pixel cuenta como quemado (ver saturados()).
-UMBRAL_SATURADO = 240
+#
+# Son DOS valores, y hace falta que lo sean: el receptor lee de dos maneras y
+# NO usan la misma escala.
+#
+#   BGR       blanco pleno = 255.  240 va bien.
+#   plano Y   el video de consumo va en rango LIMITADO (TV): el blanco pleno
+#             es 235, no 255.  Con 240 la cuenta sale SIEMPRE cero y el modo
+#             por quemados -el que mas manda de dia- queda MUERTO sin avisar.
+#             Medido sobre una luz totalmente saturada: el nucleo llega a 239.
+#
+# El camino rapido de archivo (abrir_video con solo_luz) entrega el plano Y, y
+# la camara en vivo entrega BGR, asi que cada uno usa el suyo.
+UMBRAL_SATURADO_BGR = 240
+UMBRAL_SATURADO_LUZ = 230
+UMBRAL_SATURADO = UMBRAL_SATURADO_BGR      # el de siempre, para quien lo use
+
+# Como se mide el COLOR dentro del recuadro (solo importa en el modo por color,
+# el de las luces fundidas en un punto):
+#
+#   "ponderado"  media de todo el recuadro pesada por el brillo. Las DOS luces
+#                aportan, asi que el estado "las dos encendidas" cae de verdad
+#                en medio.  RECOMENDADO.
+#   "picos"      solo los N pixeles mas brillantes (lo que se hacia antes). Si
+#                un LED se ve mas brillante que el otro, "las dos encendidas"
+#                se lee como si estuviera solo el brillante y no descifra.
+MODO_CROMA = "ponderado"
 
 # Nada se decide con valores absolutos: una luz esta "prendida" cuando pasa de
 # esta fraccion de su propio recorrido, y solo si el recorrido llega al margen.
@@ -185,6 +223,24 @@ MAX_CANDIDATOS_VIVO = 8
 
 # Cada cuanto se vuelve a buscar mientras no salga el bloque.
 BUSQUEDA_CADA_S = 3.0
+
+# --- LA VENTANA DE LA CAMARA EN VIVO -------------------------------------
+# Ancho al que se muestra la imagen. Solo afecta a lo que se ve, no a lo que
+# se mide: medir siempre va sobre el cuadro original.
+ANCHO_VENTANA_VIVO = 960
+
+# LUPA: un recuadro en una esquina con la zona ampliada, para poder apuntar
+# las luces sin acercarse a la pantalla. Ampliia, por este orden de
+# preferencia: la pareja que mas pinta de transmisor, o el recuadro marcado a
+# mano con la tecla m.
+LUPA_ACTIVA = True
+LUPA_LADO_PX = 240                    # lado del recuadro de la lupa, en pantalla
+LUPA_ESQUINA = "superior-derecha"     # superior/inferior + derecha/izquierda
+LUPA_AUMENTO_MAX = 10.0               # tope, para que no salga un mosaico
+LUPA_MARGEN_PX = 12                   # separacion respecto al borde
+
+# Panel de teclas: el rotulo con lo que se puede pulsar.
+PANEL_TECLAS = True
 
 # Una vez fijados, los recuadros de una pareja no se mueven. Moverlos empeora:
 # un servo de brillo se va solo hacia el halo de la luz encendida, y saltar a
@@ -568,34 +624,61 @@ def saturados(roi, umbral=UMBRAL_SATURADO):
     return float(np.count_nonzero(gris > umbral))
 
 
-def lum_y_croma(roi):
+def lum_y_croma(roi, modo=None):
     """(luminancia, croma) de un recuadro BGR.
 
     croma = (R-G)/(R+G): positivo = luz roja, negativo = verde, ~0 = las dos
     (o ninguna, que se distingue por la luminancia). Dividir por (R+G) lo hace
     independiente de la exposicion.
 
-    Se mide sobre los pixeles mas brillantes QUE NO ESTEN SATURADOS, y las dos
-    exclusiones importan: promediar el recuadro entero diluye la luz, y
-    quedarse con el pico tampoco vale porque de cerca el nucleo satura en
-    R=G=B=255 y ahi ya no hay color. El color vive en el halo.
+    En los dos modos se descartan primero los pixeles SATURADOS, y eso importa:
+    de cerca el nucleo satura en R=G=B=255 y ahi ya no hay color. El color vive
+    en el halo. Promediar el recuadro entero a secas tampoco vale, porque
+    diluye la luz en el fondo.
+
+    Lo que cambia entre los dos modos es COMO se juntan los pixeles que quedan:
+
+      "ponderado"  media de todo el recuadro pesada por brillo^2. Las DOS luces
+                   aportan a la vez, cada una segun lo que alumbre.
+      "picos"      solo los N mas brillantes.
+
+    Y esa diferencia decide si el modo por color funciona o no. Con "picos",
+    cuando las dos luces estan encendidas, gana la que se vea mas brillante y
+    el par se lee como si solo estuviera esa: medido sobre una toma con un LED
+    un 20% mas luminoso que el otro, el estado "las dos" se leia como "solo la
+    verde" el 100% de las veces, y el CRC no cerraba nunca. Con "ponderado", el
+    mismo caso acierta el 100% de los cuadros.
     """
     if roi.size == 0:
         return 0.0, 0.0
     suave = suavizar(roi).astype(np.float32)
     b, g, r = suave[:, :, 0], suave[:, :, 1], suave[:, :, 2]
-    plano = ((b + g + r) / 3.0).ravel()
-    n = max(12, int(plano.size * 0.001))
+    plano = (b + g + r) / 3.0
 
+    if (modo or MODO_CROMA) == "ponderado":
+        # peso = brillo^2 sobre lo que no esta quemado. El cuadrado separa la
+        # luz del fondo: un halo al doble de brillo que la pared pesa cuatro
+        # veces mas, asi que el fondo no arrastra el color aunque ocupe mas.
+        peso = np.where(plano < 250, plano, 0.0) ** 2
+        total = float(peso.sum())
+        if total <= 0:                      # todo quemado: se mide tal cual
+            peso, total = np.ones_like(plano), float(plano.size)
+        mr = float((r * peso).sum() / total)
+        mg = float((g * peso).sum() / total)
+        mb = float((b * peso).sum() / total)
+        return float(plano.max()), (mr - mg) / (mr + mg + 1.0)
+
+    llano = plano.ravel()
+    n = max(12, int(llano.size * 0.001))
     # Primero se descartan los saturados y DESPUES se toman los mas brillantes
     # de lo que queda. Al reves no sirve: con la luz cerca, mas del 3% del
     # cuadro puede estar saturado y un percentil fijo devuelve solo nucleo
     # blanco, sin color.
-    idx_ok = np.flatnonzero(plano < 250)
+    idx_ok = np.flatnonzero(llano < 250)
     if idx_ok.size < n:
-        idx_ok = np.arange(plano.size)
+        idx_ok = np.arange(llano.size)
     n = min(n, idx_ok.size)
-    orden = np.argpartition(plano[idx_ok], idx_ok.size - n)[idx_ok.size - n:]
+    orden = np.argpartition(llano[idx_ok], idx_ok.size - n)[idx_ok.size - n:]
     sel = idx_ok[orden]
 
     mr = float(r.ravel()[sel].mean())
@@ -678,12 +761,52 @@ def clasificar_por_posicion(brillos_a, brillos_b, ventana=VENTANA_UMBRALES):
     return list(estados)
 
 
+def tres_grupos(valores, vueltas=12):
+    """Parte una serie de cromas en TRES grupos y devuelve las dos fronteras.
+
+    Es un k-medias de una dimension con k=3 (verde, las dos, roja), arrancado
+    en los percentiles 10/50/90 para que salga siempre igual: no hay azar y no
+    hace falta sklearn.
+
+    Sustituye a cortar el recorrido en tercios fijos, y la diferencia es
+    grande. Los tercios suponen que "las dos encendidas" cae justo en el medio
+    del recorrido, y eso solo pasa si los dos LED se ven IGUAL de brillantes.
+    Con uno un 20% mas luminoso que el otro, el punto de "las dos" se corre
+    hacia el brillante, se sale de su tercio y la trama no cierra el CRC nunca.
+    Los grupos se colocan donde de verdad estan las muestras, asi que aguantan
+    el desequilibrio.
+
+    Devuelve (t1, t2) con t1 < t2, o None si no hay tres grupos que valgan.
+    """
+    v = np.sort(np.asarray(valores, dtype=np.float64))
+    if len(v) < 12:
+        return None
+    centros = np.percentile(v, (10, 50, 90))
+    for _ in range(vueltas):
+        # frontera = punto medio entre centros vecinos
+        cortes = (centros[:-1] + centros[1:]) / 2.0
+        grupo = np.searchsorted(cortes, v)
+        nuevos = np.array([v[grupo == k].mean() if np.any(grupo == k)
+                           else centros[k] for k in range(3)])
+        if np.allclose(nuevos, centros, atol=1e-6):
+            break
+        centros = np.sort(nuevos)
+    t1, t2 = (centros[0] + centros[1]) / 2.0, (centros[1] + centros[2]) / 2.0
+    if t2 - t1 < 0.01:                  # los tres grupos son el mismo color
+        return None
+    return float(t1), float(t2)
+
+
 def clasificar_por_color(lums, cromas, ventana=VENTANA_UMBRALES):
     """Series de (luminancia, croma) -> estado de las luces en cada cuadro.
 
     La unica forma de leerlas cuando estan tan lejos que se funden en un solo
     punto y ya no hay dos sitios que mirar. A cambio exige que sean de colores
     distintos.
+
+    Dos decisiones distintas, y cada una con su criterio:
+      APAGADO / encendida    por LUMINANCIA, con percentiles moviles.
+      cual de las tres       por CROMA, con tres grupos (ver tres_grupos).
     """
     lums = np.asarray(lums, dtype=np.float32)
     cromas = np.asarray(cromas, dtype=np.float32)
@@ -696,8 +819,8 @@ def clasificar_por_color(lums, cromas, ventana=VENTANA_UMBRALES):
     # DOS colores hace falta mas señal que para ver si una luz se enciende
     apagado = (p90 - p10 < 6) | (lums < corte_off)
 
-    # Los umbrales de croma dependen de QUE muestras estan encendidas en cada
-    # ventana, asi que se calculan por anclas igual que los de luminancia. Un
+    # Las fronteras de croma dependen de QUE muestras estan encendidas en cada
+    # ventana, asi que se calculan por anclas igual que las de luminancia. Un
     # ancla sin color utilizable se queda en cero y no aporta.
     anclas = anclas_de(n)
     ct1 = np.zeros(len(anclas), dtype=np.float32)
@@ -708,11 +831,10 @@ def clasificar_por_color(lums, cromas, ventana=VENTANA_UMBRALES):
         prendidos = cromas[a:b][lums[a:b] >= corte_off[i]]
         if len(prendidos) < 10:
             continue
-        lo, hi = np.percentile(prendidos, (12, 88))
-        if hi - lo < 0.02:              # un solo color en la ventana
+        fronteras = tres_grupos(prendidos)
+        if fronteras is None:           # un solo color en la ventana
             continue
-        ct1[k] = lo + 0.34 * (hi - lo)
-        ct2[k] = lo + 0.68 * (hi - lo)
+        ct1[k], ct2[k] = fronteras
         hay[k] = 1.0
     todos = np.arange(n)
     t1 = np.interp(todos, anclas, ct1)
@@ -780,8 +902,26 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
         return cv2.GaussianBlur(g.mean(2) if g.ndim == 3 else g, (3, 3), 0)
 
     pila = np.stack([gris(f) for f in bloque])
-    brillo = np.percentile(pila, 95, axis=0) / 255.0
-    pila = pila - pila.mean(0, keepdims=True)
+    forma = pila.shape[1:]
+    # El maximo temporal, no el percentil 95: da practicamente lo mismo (una
+    # luz que se enciende llega a su tope en muchos cuadros) y cuesta 10 ms en
+    # vez de 620, porque el percentil tiene que ordenar cada pixel.
+    brillo = pila.max(0) / 255.0
+    pila = (pila - pila.mean(0, keepdims=True)).reshape(len(bloque), -1)
+    llano = brillo.ravel()
+
+    # SOLO SE TRANSFORMA LO QUE ALUMBRA. El resultado se multiplica por
+    # brillo^2, asi que lo oscuro acaba en cero de todas formas y transformarlo
+    # es tiempo tirado: sobre un tramo real, 1565 ms -> 128 ms con los mismos
+    # picos. Ver FRACCION_PIXELES_FFT.
+    if 0 < FRACCION_PIXELES_FFT < 1.0:
+        corte = float(np.quantile(llano, 1.0 - FRACCION_PIXELES_FFT))
+        indices = np.flatnonzero(llano >= corte)
+    else:
+        indices = np.arange(llano.size)
+    if indices.size == 0:
+        return np.zeros(forma, np.float32)
+    pila = pila[:, indices]
 
     espectro = np.abs(np.fft.rfft(pila, axis=0))
     frec = np.fft.rfftfreq(len(bloque), d=1.0 / max(1e-6, fps))
@@ -793,7 +933,10 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
     lentas = (frec > 0) & (frec < banda[0])
     if lentas.any():
         pico = pico * np.minimum(1.0, pico / (espectro[lentas].max(0) + 1.0))
-    return pico * brillo ** 2
+
+    mapa = np.zeros(llano.size, np.float32)
+    mapa[indices] = pico * llano[indices] ** 2
+    return mapa.reshape(forma)
 
 
 def picos_de_luz(mapa, cuantos=4, frac=0.45, margen=2, borde=5):
@@ -843,13 +986,15 @@ def parpadeo_en(bloque, x, y, lado):
     return encendida(v, p10, p90), True
 
 
-def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
+def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6,
+                   sueltos=2):
     """Las parejas de luces que se ven en un bloque de cuadros reducidos.
 
     Devuelve [(punto_A, vector_hasta_B, nota, puntaje)] en pixeles del cuadro
     ORIGINAL, de la mas prometedora a la menos, o [] si no se ve nada
-    parpadeando. Si solo aparece un punto util el vector sale nulo: las luces
-    estan fundidas y habra que leerlas por color.
+    parpadeando. Un vector NULO significa "aqui hay un punto suelto": o es una
+    sola luz, o son las dos fundidas, y en los dos casos toca leerlo por color.
+    Siempre se proponen los 'sueltos' picos mas fuertes ademas de las parejas.
 
     No empareja por altura del pico sino exigiendo que los dos puntos LLEVEN
     SEÑALES DISTINTAS. Las luces salen tambien reflejadas -en un vidrio, en el
@@ -895,15 +1040,28 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6):
         nota = ("dos luces a %.0f px (se diferencian en el %.0f%% de los "
                 "cuadros)" % (math.hypot(v[0], v[1]), 100 * distintos))
         salida.append((p + (ox, oy), v, nota, puntaje))
-    if not salida:
-        # un solo punto util: o hay una sola luz a la vista, o las dos estan
-        # tan lejos que se fundieron. En los dos casos toca leerlas por color.
-        for (x, y, _), (_, cambia) in zip(hallados, parpadeos):
-            if cambia:
-                p = np.array([x, y], dtype=float) * escala
-                salida.append((p + (ox, oy), np.zeros(2),
-                               "una sola luz a la vista", 0.0))
-                break
+
+    # Y SIEMPRE, ademas, los picos sueltos mas fuertes, con separacion nula
+    # (o sea: "aqui puede haber DOS luces fundidas en un punto, leelas por
+    # color"). Antes esto solo se hacia cuando no habia salido NINGUNA pareja,
+    # y por eso se perdian tomas enteras:
+    #
+    #   si las dos luces estan tan lejos que se funden, el LED no puede
+    #   emparejarse con nadie; pero si en la escena hay otras cosas que
+    #   parpadean -hojas, un reflejo, un monitor-, ESAS si se emparejan entre
+    #   ellas, la lista no queda vacia, y el punto suelto no se proponia nunca.
+    #
+    # Medido sobre una toma de prueba: el LED era el pico MAS FUERTE de toda la
+    # imagen (588 contra 425, 376 y 330) y no aparecia en ninguna de las tres
+    # parejas propuestas. Proponerlo cuesta un candidato mas, que es barato:
+    # medir ocho parejas vale casi lo mismo que medir una.
+    for (x, y, fuerza), (_, cambia) in zip(hallados[:sueltos], parpadeos):
+        if not cambia:
+            continue
+        p = np.array([x, y], dtype=float) * escala
+        salida.append((p + (ox, oy), np.zeros(2),
+                       "un punto suelto: puede ser una pareja fundida",
+                       fuerza))
     return salida
 
 
@@ -1161,8 +1319,11 @@ class Candidato:
     """
 
     def __init__(self, punto, separacion, escala, historia, nacido,
-                 con_color=True):
+                 con_color=True, umbral_saturado=UMBRAL_SATURADO_BGR):
         self.punto = np.asarray(punto, dtype=float)
+        # de que escala vienen los pixeles: BGR llega a 255, el plano Y de un
+        # video de consumo se queda en 235. Ver UMBRAL_SATURADO_* .
+        self.umbral_saturado = umbral_saturado
         self.separacion = np.asarray(separacion, dtype=float)
         self.historia = historia
         self.nacido = nacido
@@ -1256,8 +1417,14 @@ class Candidato:
             ventana = recorte_caja(g, caja)
             self.ba.append(brillo_de(ra))
             self.bb.append(brillo_de(rb))
-            self.sa.append(saturados(ra))
-            self.sb.append(saturados(rb))
+            # Los quemados son una CUENTA DE PIXELES, asi que dependen del
+            # tamaño del recuadro: aqui la imagen viene reducida y el recuadro
+            # tiene escala^2 veces menos pixeles. Sin corregirlo la serie da un
+            # escalon justo donde acaba la precarga y empieza la medida buena,
+            # y la ventana movil de umbrales se come ese escalon como si fuera
+            # señal.
+            self.sa.append(saturados(ra, self.umbral_saturado) * escala ** 2)
+            self.sb.append(saturados(rb, self.umbral_saturado) * escala ** 2)
             # los cuadros guardados son en gris: hay luminancia pero no croma
             self.lum.append(float(ventana.mean()) if ventana.size else 0.0)
             self.croma.append(0.0)
@@ -1277,7 +1444,8 @@ class Candidato:
         ra = recorte_centrado(f, self.punto, self.lado)
         rb = recorte_centrado(f, self.punto + self.separacion, self.lado)
         a, b = brillo_de(ra), brillo_de(rb)
-        sa, sb = saturados(ra), saturados(rb)
+        sa, sb = (saturados(ra, self.umbral_saturado),
+                  saturados(rb, self.umbral_saturado))
         # para el modo por color hacen falta las DOS en el mismo recuadro: el
         # croma no dice cual esta prendida si cada una se mide por separado
         l, c = (lum_y_croma(recorte_caja(f, self.roi())) if self.con_color
@@ -1707,8 +1875,11 @@ def medir_en_video(ruta, parejas, avisar=None, con_color=False):
         fundidas = not np.any(separacion)
         mide_color = con_color and (fundidas or separadas < 3)
         separadas += 0 if fundidas else 1
-        candidatos.append(Candidato(quieta, separacion, escala, 10 ** 9, 0.0,
-                                     con_color=mide_color))
+        candidatos.append(Candidato(
+            quieta, separacion, escala, 10 ** 9, 0.0, con_color=mide_color,
+            # el camino rapido entrega el plano Y, que se queda en 235
+            umbral_saturado=(UMBRAL_SATURADO_LUZ if en_luz
+                             else UMBRAL_SATURADO_BGR)))
         caminos.append(camino)
 
     tiempos, i = [], 0
@@ -1849,50 +2020,90 @@ def procesar_video(ruta, simbolos_por_s=None, verboso=True, zona=None):
 
 
 # ------------------------------------------- 4.4 abrir la camara ----------
+#
+# Windows, macOS y Linux no abren las camaras con el mismo backend, y pedir el
+# que no toca no da un error claro: da una camara que "no responde" o que
+# entrega negro. Aqui se prueban en el orden que corresponde a cada sistema.
+
+def backends_de_camara():
+    """Los backends que hay que probar en ESTE sistema, en orden.
+
+    Windows  DSHOW es el unico que deja fijar la exposicion, pero las camaras
+             "modernas" (el celular por Enlace movil, por ejemplo) solo abren
+             por MSMF: con DSHOW a secas salen en la lista y luego no abren.
+    macOS    AVFOUNDATION es el unico que existe; con el hay que dar permiso
+             de camara a la aplicacion (Ajustes > Privacidad > Camara).
+    Linux    V4L2.
+
+    CAP_ANY va siempre de ultimo, que es "que decida OpenCV".
+    """
+    preferidos = {"win32": ("CAP_DSHOW", "CAP_MSMF"),
+                  "darwin": ("CAP_AVFOUNDATION",),
+                  }.get(sys.platform, ("CAP_V4L2",))
+    orden = [getattr(cv2, n) for n in preferidos if hasattr(cv2, n)]
+    return orden + [cv2.CAP_ANY]
+
+
+def fijar_exposicion(cap, exposicion):
+    """Baja la exposicion, si el backend deja.
+
+    En Windows el valor va en pasos logaritmicos (-7 es oscuro); en macOS y
+    Linux la escala es otra y muchas camaras UVC ni lo admiten. Como no todas
+    responden igual, se intenta y no se da por hecho: si no cambia nada, la
+    imagen sigue viendose y no se rompe nada.
+    """
+    if exposicion is None:
+        return False
+    try:
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # 0.25 = manual en Windows
+        if sys.platform.startswith("linux"):
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1 = manual en V4L2
+        return bool(cap.set(cv2.CAP_PROP_EXPOSURE, exposicion))
+    except cv2.error:
+        return False
+
 
 def abrir_camara(cual, fps_pedidos=FPS_CAMARA, exposicion=EXPOSICION_CAMARA):
     """Abre una camara por indice (0, 1, ...) o por URL, y la deja lista.
 
     Una URL sirve para usar el celular o una camara de red como camara del PC:
     ver la nota de COMO CONECTAR OTRA CAMARA en el encabezado. Con URL se usa
-    FFMPEG, que es el backend que entiende http y rtsp; con indice, el de
-    Windows (DSHOW), que es el unico que deja fijar la exposicion.
+    FFMPEG, que es el backend que entiende http y rtsp; con indice, el que
+    corresponda al sistema (ver backends_de_camara).
     """
     if isinstance(cual, str) and not str(cual).isdigit():
         cap = cv2.VideoCapture(cual, cv2.CAP_FFMPEG)          # celular o IP
     else:
-        # Se prueban los tres backends en orden. DSHOW es el unico que deja
-        # fijar la exposicion, pero las camaras "modernas" de Windows (la del
-        # celular por Enlace movil, por ejemplo) solo abren por MSMF: si se
-        # usara DSHOW a secas, esas camaras salen en la lista y luego no abren.
+        orden = backends_de_camara()
         cap = None
-        for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):
+        for backend in orden:
             prueba = cv2.VideoCapture(int(cual), backend)
             if prueba.isOpened() and prueba.read()[0]:
                 cap = prueba
                 break
             prueba.release()
         if cap is None:                    # ninguno abrio: se devuelve cerrada
-            return cv2.VideoCapture(int(cual), cv2.CAP_DSHOW)
+            return cv2.VideoCapture(int(cual), orden[0])
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap.set(cv2.CAP_PROP_FPS, fps_pedidos)
-    if exposicion is not None:
-        # Solo si se pide: en un cuarto normal una exposicion de -7 deja la
-        # imagen practicamente negra, y eso parece una camara rota cuando en
-        # realidad esta funcionando. Ver EXPOSICION_CAMARA en PARAMETROS.
-        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-        cap.set(cv2.CAP_PROP_EXPOSURE, exposicion)
+    # Solo si se pide: en un cuarto normal una exposicion de -7 deja la imagen
+    # practicamente negra, y eso parece una camara rota cuando en realidad
+    # esta funcionando. Ver EXPOSICION_CAMARA en PARAMETROS.
+    fijar_exposicion(cap, exposicion)
     return cap
 
 
 def nombres_camaras(hasta=8):
     """Los NOMBRES de las camaras del PC, los mismos que muestra Zoom o Meet.
 
-    OpenCV solo las abre por numero; los nombres los tiene DirectShow y en
-    Windows se leen con pygrabber (pip install pygrabber). Sin el devuelve []
-    y hay que elegir la camara por numero.
+    OpenCV solo las abre por NUMERO; el nombre no lo sabe. En Windows lo tiene
+    DirectShow y se lee con pygrabber (pip install pygrabber). En macOS y Linux
+    no hay equivalente sencillo, asi que devuelve [] y se escoge por numero:
+    no es un fallo, es que ahi no hay nombres que dar.
     """
+    if sys.platform != "win32":
+        return []
     try:
         from pygrabber.dshow_graph import FilterGraph
         return list(FilterGraph().get_input_devices())[:hasta]
@@ -1910,11 +2121,13 @@ def camaras_disponibles(hasta=6):
     nombres = nombres_camaras(hasta)
     encontradas = []
     for i in range(hasta):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if not cap.isOpened():
+        cap = None
+        for backend in backends_de_camara():
+            cap = cv2.VideoCapture(i, backend)
+            if cap.isOpened():
+                break
             cap.release()
-            cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
-        if cap.isOpened():
+        if cap is not None and cap.isOpened():
             ok, f = cap.read()
             for _ in range(4):            # las primeras suelen venir en negro
                 ok2, f2 = cap.read()
@@ -2379,8 +2592,7 @@ def escuchar_camara(cual=CAMARA, simbolos_por_s=None, fps_pedidos=FPS_CAMARA,
                 break
             if isinstance(respuesta, dict) and "exposicion" in respuesta:
                 exposicion_actual = respuesta["exposicion"]
-                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                cap.set(cv2.CAP_PROP_EXPOSURE, exposicion_actual)
+                fijar_exposicion(cap, exposicion_actual)
             escucha.atender(respuesta)
     finally:
         cap.release()
