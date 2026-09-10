@@ -5,13 +5,24 @@ Redes de Computadores I, UdeA 2026-2, Proyecto 01. Lee las dos luces de un
 video o de la camara en vivo y reconstruye el bloque de celdas.
 
 Sin argumentos pregunta que analizar. Solo necesita numpy y opencv-python.
+Funciona igual en Windows, macOS y Linux.
 
     python rx_camara.py --video "toma.mp4"
     python rx_camara.py --camara 1
-    python rx_camara.py --camaras                 lista las camaras del PC
+    python rx_camara.py --camaras                  lista las camaras del PC
     python rx_camara.py --simular-vivo "toma.mp4"  un video, como si fuera
-                                                  la camara en vivo
-    python rx_camara.py --autoprueba              revisa el codigo sin camara
+                                                   la camara en vivo
+    python rx_camara.py --banco "carpeta"          descifra TODOS los videos
+                                                   de esa carpeta y saca tabla
+    python rx_camara.py --autoprueba               revisa el codigo sin camara
+    python rx_camara.py --autoprueba --autoprueba-pdi
+                                                   ademas fabrica un video de
+                                                   prueba y lo descifra
+
+Para no marcar el recuadro con el mouse cada vez, o para correr sin pantalla:
+
+    --zona 860,520,140,90      donde buscar, en pixeles del cuadro original
+    --sin-zona                 no preguntar: buscar en todo el cuadro
 
 Secciones. Se leen de arriba abajo y cada una usa solo las anteriores, asi
 que se puede entrar por cualquiera sin haber leido lo de abajo:
@@ -31,13 +42,27 @@ que se puede entrar por cualquiera sin haber leido lo de abajo:
     6. ARRANQUE
 
 Las 1 y 3 son puro calculo y --autoprueba las prueba enteras; la 2 es la unica
-que toca pixeles y la 5 la unica que abre ventanas.
+que toca pixeles y la 5 la unica que abre ventanas. La 2 se prueba con
+--autoprueba-pdi, que fabrica un video y lo descifra: es la red de seguridad
+para cuando se toca un umbral.
 
 Cosas a tener en cuenta:
 
-- Cual luz esta prendida se decide por posicion (dos puntos separados, sirve
-  con luces iguales) o por color (si se funden en un punto, hacen falta colores
-  distintos). Se prueban las dos.
+- Cual luz esta prendida se decide por POSICION (dos puntos separados: sirve
+  con luces iguales, blancas incluidas) o por COLOR (si se funden en un punto:
+  hacen falta colores distintos). Se prueban las dos.
+- Si se va a depender del modo por color, los dos LED tienen que verse IGUAL
+  DE BRILLANTES en la camara, no solo de colores distintos. Con uno mas fuerte
+  que el otro, el estado "las dos encendidas" se corre hacia el brillante.
+  El receptor lo aguanta (ver tres_grupos), pero cuanto mas parejos, mejor.
+- Para que se vean como DOS PUNTOS y no como uno, hacen falta unos 14 px de
+  separacion en el cuadro original. Con un celular a 1080p:
+
+      separacion_en_px  =  1500 * (separacion_de_las_luces_m) / (distancia_m)
+
+  o sea, mas o menos un centimetro de separacion por cada metro de distancia
+  para llegar al minimo, y el doble para ir comodo. Por debajo de eso las
+  luces se funden y solo queda el modo por color.
 - La velocidad maxima es fps/3: 10 simbolos/s a 30 fps, 20 a 60. Reexportar un
   video a menos fps se come el margen.
 - La camara tiene que estar quieta. Para tomas a pulso esta
@@ -1915,6 +1940,9 @@ def seleccionar_zona_video(ruta):
     por color, que es el que NO sirve para dos luces del mismo color. Marcar la
     caja daba justo el peor de los dos modos.
     """
+    if not hay_pantalla():
+        print("(sin interfaz grafica: se buscan las luces en todo el cuadro)")
+        return None
     cap = cv2.VideoCapture(str(ruta))
     if not cap.isOpened():
         print("No se pudo abrir el video para escoger la zona.")
@@ -2216,9 +2244,19 @@ class RastreadorVivo:
     def medidos(self):
         return max((len(c.t) for c in self.candidatos), default=0)
 
-    def rois(self):
-        """Los recuadros que se estan midiendo, el mas prometedor primero."""
-        return [c.roi() for c in self.candidatos]
+    def rois(self, fps=None):
+        """Los recuadros que se estan midiendo, EL MAS PROMETEDOR PRIMERO.
+
+        Ordenar aqui no es cosmetica: quien dibuja pinta el primero destacado y
+        la lupa amplia ese, asi que sin ordenar se resaltaba el candidato que
+        hubiera entrado antes, no el que mejor pinta. Se ordena por lo que ya
+        esta apuntado (avistamientos y el parpadeo mas vivo visto), sin volver
+        a calcular nada: esto se llama en cada cuadro.
+        """
+        orden = sorted(self.candidatos,
+                       key=lambda c: (c.protegida, c.visto, c.mejor),
+                       reverse=True)
+        return [c.roi() for c in orden]
 
     # --- las dos tareas caras, para lanzarlas en otro hilo ---------------
     def tarea_de_busqueda(self, fps):
@@ -2314,15 +2352,27 @@ class RastreadorVivo:
             del self.vistas[40:]
         return 1
 
-    def _resumen(self, fps, ahora):
+    def _resumen(self, fps, ahora, detalle=2):
+        """Una linea para la pantalla: las mejores y cuantas mas hay.
+
+        Se detallan solo las 'detalle' primeras. Listarlas todas daba un
+        renglon de trescientos caracteres que salia cortado por la derecha, y
+        lo unico que hace falta ver de un vistazo es si la que va primera es
+        el transmisor o unas hojas.
+        """
+        orden = sorted(self.candidatos,
+                       key=lambda c: (c.protegida, c.visto, c.mejor),
+                       reverse=True)
         partes = []
-        for c in sorted(self.candidatos, key=lambda c: c.puntaje(fps, ahora),
-                        reverse=True):
+        for c in orden[:detalle]:
             d = math.hypot(c.separacion[0], c.separacion[1])
-            partes.append("%s a %.0f px (vista %d veces, %.0f cambios/s)"
-                          % ("dos luces" if c.separadas else "una luz",
+            partes.append("%s a %.0f px (vista %dx, %.0f cambios/s)"
+                          % ("dos luces" if c.separadas else "un punto",
                              d, c.visto, c.actividad(fps)))
-        return "midiendo %d: %s" % (len(partes), " | ".join(partes))
+        resto = len(orden) - len(partes)
+        if resto > 0:
+            partes.append("y %d mas" % resto)
+        return "midiendo %d: %s" % (len(orden), "  |  ".join(partes))
 
     # --- el cuadro a cuadro ---------------------------------------------
     def alimentar(self, f, t, fps, buscar_mas=True):
@@ -2410,6 +2460,7 @@ class EscuchaEnVivo:
         self.nota = "esperando transmision..."
         self.congelado = False
         self.zona = None
+        self.lupa = LUPA_ACTIVA        # la enciende y apaga la tecla z
         self.hilo_busca = None
         self.hilo_descifra = None
         self.proxima_busqueda = 0.0
@@ -2493,6 +2544,7 @@ class EscuchaEnVivo:
         return {
             "grid": self.grid, "nota": self.nota, "cuadro": cuadro,
             "rois": self.rastreador.rois(), "zona": self.zona,
+            "lupa": self.lupa,
             "estado": self.rastreador.nota,
             "enganchado": self.rastreador.enganchado,
             "congelado": self.congelado,
@@ -2505,7 +2557,9 @@ class EscuchaEnVivo:
     def atender(self, respuesta):
         """Aplica lo que pidio quien dibuja, menos la exposicion (esa es de la
         captura y la maneja el bucle)."""
-        if isinstance(respuesta, dict) and "zona" in respuesta:
+        if isinstance(respuesta, dict) and "lupa" in respuesta:
+            self.lupa = bool(respuesta["lupa"])
+        elif isinstance(respuesta, dict) and "zona" in respuesta:
             # el recuadro a mano dice DONDE BUSCAR, no donde medir: donde medir
             # lo decide el rastreador y lo hace mejor que un rectangulo a pulso
             self.zona = respuesta["zona"]
@@ -3062,6 +3116,29 @@ def imprimir_bloque(grid, nota):
     print("=" * 52 + "\n")
 
 
+_HAY_PANTALLA = None
+
+
+def hay_pantalla():
+    """Si se pueden abrir ventanas de OpenCV en esta maquina.
+
+    Se comprueba una vez, abriendo y cerrando una ventana de mentira. Hace
+    falta porque OpenCV sin interfaz (opencv-python-headless, un servidor, una
+    sesion sin escritorio) no avisa: revienta con una excepcion de C++ en
+    mitad del trabajo, despues de haber descifrado, y se pierde el resultado.
+    Sabiendolo antes, se imprime el bloque y ya.
+    """
+    global _HAY_PANTALLA
+    if _HAY_PANTALLA is None:
+        try:
+            cv2.namedWindow("_prueba_", cv2.WINDOW_NORMAL)
+            cv2.destroyWindow("_prueba_")
+            _HAY_PANTALLA = True
+        except Exception:
+            _HAY_PANTALLA = False
+    return _HAY_PANTALLA
+
+
 def mostrar_resultado(grid, nota, guardar=None):
     """Deja el bloque en pantalla hasta que se cierre. Nada mas.
 
@@ -3074,6 +3151,11 @@ def mostrar_resultado(grid, nota, guardar=None):
     if guardar:
         cv2.imwrite(guardar, pintar_bloque(grid, 900, 760, titulo))
         print("imagen guardada en %s" % guardar)
+    if not hay_pantalla():
+        # sin escritorio no hay ventana que abrir, pero el bloque ya se
+        # imprimio por consola: no es un fallo, no hay nada mas que hacer
+        print("(sin interfaz grafica: el bloque queda impreso arriba)")
+        return
     cv2.imshow("bloque recibido  ('s' guarda, 'q' cierra)", img)
     while True:
         k = cv2.waitKey(50) & 0xFF
@@ -3090,8 +3172,7 @@ def mostrar_resultado(grid, nota, guardar=None):
     cv2.destroyAllWindows()
 
 
-VENTANA_CAMARA = ("camara   q salir | r reiniciar | + - exposicion | "
-                  "m buscar solo en un recuadro | a en todo el cuadro")
+VENTANA_CAMARA = "receptor por camara - escuchando"
 
 
 AVISO_IMAGEN_NEGRA = (
@@ -3102,52 +3183,234 @@ AVISO_IMAGEN_NEGRA = (
 )
 
 
-def _rotular(vista, texto, fila, escala=0.5, color=(160, 220, 160)):
-    cv2.putText(vista, texto, (12, 26 + fila * 22), cv2.FONT_HERSHEY_SIMPLEX,
-                escala, color, 1, cv2.LINE_AA)
+# Las teclas de la ventana en vivo, en un solo sitio: se pintan de aqui y se
+# atienden de aqui, asi que añadir una es tocar esta lista y _atender_teclado.
+TECLAS_VIVO = (
+    ("q", "salir"),
+    ("r", "reiniciar la escucha"),
+    ("m", "marcar donde buscar"),
+    ("a", "buscar en todo el cuadro"),
+    ("+ -", "exposicion"),
+    ("z", "lupa si / no"),
+)
+
+# Colores BGR de los rotulos, juntos para poder cambiarlos de un vistazo.
+TINTA = {
+    "panel": (24, 24, 28),
+    "tecla": (120, 235, 255),
+    "texto": (235, 235, 235),
+    "bien": (120, 255, 180),
+    "buscando": (120, 200, 255),
+    "aviso": (0, 255, 255),
+    "alarma": (60, 60, 255),
+    "pareja": (255, 180, 0),
+    "otras": (150, 150, 150),
+    "congelado": (0, 255, 0),
+}
 
 
-def _pintar_camara(e):
-    """El cuadro de la camara con los recuadros y el estado encima."""
-    cuadro = e["cuadro"]
-    vista = cuadro.copy()
+def _texto(img, texto, org, escala=0.5, color=None, grosor=1):
+    cv2.putText(img, texto, org, cv2.FONT_HERSHEY_SIMPLEX, escala,
+                color or TINTA["texto"], grosor, cv2.LINE_AA)
 
-    # Los recuadros van en pixeles del cuadro TAL CUAL lo entrega la camara:
-    # desde que se mide sin reducir no hay ninguna escala que deshacer.
+
+def _ancho_texto(texto, escala, grosor=1):
+    return cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, escala,
+                           grosor)[0][0]
+
+
+def _recortar(texto, ancho_px, escala):
+    """Corta un rotulo por donde de verdad se sale, midiendolo.
+
+    Cortar por numero de caracteres no vale: el ancho depende de la letra y de
+    la escala, asi que unas veces sobraba sitio y otras se salia del borde.
+    """
+    if _ancho_texto(texto, escala) <= ancho_px:
+        return texto
+    bajo, alto = 0, len(texto)
+    while bajo < alto:
+        medio = (bajo + alto + 1) // 2
+        if _ancho_texto(texto[:medio] + "...", escala) <= ancho_px:
+            bajo = medio
+        else:
+            alto = medio - 1
+    return texto[:bajo] + "..."
+
+
+def _franja(img, y0, y1, alpha=0.55):
+    """Oscurece una franja para que el texto se lea sobre cualquier fondo.
+
+    Sin esto, los rotulos blancos sobre cielo o sobre una pared clara no se
+    leen, que es justo cuando hace falta mirarlos.
+    """
+    y0, y1 = max(0, y0), min(img.shape[0], y1)
+    if y1 <= y0:
+        return
+    trozo = img[y0:y1]
+    cv2.addWeighted(np.full_like(trozo, TINTA["panel"]), alpha,
+                    trozo, 1 - alpha, 0, trozo)
+
+
+def _panel_de_teclas(vista):
+    """La tira de abajo con lo que se puede pulsar.
+
+    Se pinta SOBRE LA IMAGEN YA REDUCIDA, no sobre el cuadro original: si se
+    rotula antes de reducir, un cuadro de 1920 encoge el texto a un tercio y
+    no hay quien lo lea. Ver dibujar_vista.
+    """
+    if not PANEL_TECLAS:
+        return
+    alto, ancho = vista.shape[:2]
+    escala = max(0.42, min(0.60, ancho / 1600.0))
+    hueco = int(26 * escala / 0.5)
+    salto = int(24 * escala / 0.5)
+
+    # Se reparten en las filas que hagan falta ANTES de pintar, midiendo cada
+    # trozo: asi nunca se corta una tecla por la mitad ni se sale del borde,
+    # ni cuando la ventana es estrecha.
+    filas, actual, x = [], [], 12
+    for tecla, que in TECLAS_VIVO:
+        etiqueta = "[%s]" % tecla
+        ancho_par = (_ancho_texto(etiqueta, escala, 2) + 5 +
+                     _ancho_texto(que, escala) + hueco)
+        if actual and x + ancho_par > ancho - 12:
+            filas.append(actual)
+            actual, x = [], 12
+        actual.append((etiqueta, que))
+        x += ancho_par
+    if actual:
+        filas.append(actual)
+
+    base = alto - salto * len(filas) - 8
+    _franja(vista, base - salto + 6, alto, 0.66)
+    for f, contenido in enumerate(filas):
+        y = base + salto * f + salto - 8
+        x = 12
+        for etiqueta, que in contenido:
+            _texto(vista, etiqueta, (x, y), escala, TINTA["tecla"], 2)
+            x += _ancho_texto(etiqueta, escala, 2) + 5
+            _texto(vista, que, (x, y), escala, TINTA["texto"], 1)
+            x += _ancho_texto(que, escala) + hueco
+
+
+def _zona_de_lupa(e):
+    """Que recuadro amplia la lupa, en pixeles del cuadro original.
+
+    Por orden: la pareja que mas pinta de transmisor (que es lo que uno quiere
+    comprobar), y si no hay ninguna, el recuadro marcado a mano. Asi la lupa
+    sirve para las dos cosas: apuntar las luces y ver si el receptor las cogio.
+    """
+    if e["rois"]:
+        x, y, w, h = e["rois"][0]
+        m = max(10, max(w, h) // 2)     # con aire alrededor, para situarse
+        return x - m, y - m, w + 2 * m, h + 2 * m
+    if e["zona"]:
+        return tuple(e["zona"])
+    return None
+
+
+def _pintar_lupa(vista, cuadro, e, alto_estado=0):
+    """Pega en una esquina la zona ampliada, con sus recuadros dentro.
+
+    Es lo que deja apuntar la camara sin levantarse a mirar la pantalla de
+    cerca: a 40 m las luces son cuatro pixeles y en la vista normal no se
+    distingue si el recuadro esta encima del LED o dos metros al lado.
+    """
+    if not (LUPA_ACTIVA and e.get("lupa", True)):
+        return
+    zona = _zona_de_lupa(e)
+    if zona is None:
+        return
+    alto_c, ancho_c = cuadro.shape[:2]
+    x, y, w, h = (int(v) for v in zona)
+    x, y = max(0, min(x, ancho_c - 8)), max(0, min(y, alto_c - 8))
+    w, h = max(8, min(w, ancho_c - x)), max(8, min(h, alto_c - y))
+    recorte = cuadro[y:y + h, x:x + w]
+    if recorte.size == 0:
+        return
+
+    aumento = min(LUPA_AUMENTO_MAX, LUPA_LADO_PX / float(max(w, h)))
+    aumento = max(1.0, aumento)
+    lupa = cv2.resize(recorte, None, fx=aumento, fy=aumento,
+                      interpolation=cv2.INTER_NEAREST)
+    lupa = lupa[:LUPA_LADO_PX, :LUPA_LADO_PX]
+    if lupa.ndim == 2:
+        lupa = cv2.cvtColor(lupa, cv2.COLOR_GRAY2BGR)
+
+    # los recuadros de las parejas, en coordenadas de la lupa
+    for i, (rx, ry, rw, rh) in enumerate(e["rois"][:3]):
+        p0 = (int((rx - x) * aumento), int((ry - y) * aumento))
+        p1 = (int((rx + rw - x) * aumento), int((ry + rh - y) * aumento))
+        color = (TINTA["congelado"] if e["congelado"] else
+                 TINTA["pareja"] if i == 0 else TINTA["otras"])
+        cv2.rectangle(lupa, p0, p1, color, 1)
+
+    lh, lw = lupa.shape[:2]
+    alto_v, ancho_v = vista.shape[:2]
+    m = LUPA_MARGEN_PX
+    arriba = "superior" in LUPA_ESQUINA
+    izq = "izquierda" in LUPA_ESQUINA
+    x0 = m if izq else ancho_v - lw - m
+    # arriba se deja sitio a la franja de estado y abajo al panel de teclas:
+    # si no, la lupa se come justo el texto que hay que leer
+    y0 = (alto_estado + m) if arriba else alto_v - lh - m - 56
+    x0, y0 = max(0, x0), max(0, y0)
+    if y0 + lh > alto_v or x0 + lw > ancho_v:
+        return
+    vista[y0:y0 + lh, x0:x0 + lw] = lupa
+    cv2.rectangle(vista, (x0 - 1, y0 - 1), (x0 + lw, y0 + lh),
+                  TINTA["aviso"], 2)
+    _texto(vista, "LUPA x%.0f  [z]" % aumento, (x0 + 4, y0 + lh + 16), 0.45,
+           TINTA["aviso"])
+
+
+def _pintar_recuadros(vista, e):
+    """Los recuadros sobre el cuadro ORIGINAL: se escalan solos al reducir."""
     if e["zona"]:
         x, y, w, h = e["zona"]
-        cv2.rectangle(vista, (x, y), (x + w, y + h), (0, 255, 255), 2)
+        cv2.rectangle(vista, (x, y), (x + w, y + h), TINTA["aviso"], 2)
     # Se pintan TODAS las parejas que se miden, no solo la mejor: de un
     # vistazo se ve por que no engancha (un recuadro sobre la persona que
     # pasa canta enseguida). La primera es la que mas pinta de transmisor.
     for i, (x, y, w, h) in enumerate(e["rois"]):
         m = max(6, w // 3)
-        color = ((0, 255, 0) if e["congelado"] else
-                 (255, 180, 0) if i == 0 else (140, 140, 140))
+        color = (TINTA["congelado"] if e["congelado"] else
+                 TINTA["pareja"] if i == 0 else TINTA["otras"])
         cv2.rectangle(vista, (x - m, y - m), (x + w + m, y + h + m), color,
-                      2 if i == 0 else 1)
+                      3 if i == 0 else 1)
 
-    # Una camara tapada, ocupada por otra aplicacion o con la exposicion muy
-    # baja se ve igual que una que no funciona, asi que hay que decirlo.
-    brillo = float(cuadro.mean())
+
+def _pintar_estado(vista, e, brillo):
+    """Las dos o tres lineas de arriba, ya sobre la imagen reducida."""
+    ancho = vista.shape[1]
+    escala = max(0.45, min(0.66, ancho / 1500.0))
+    salto = int(26 * escala / 0.5)
+
     if brillo < 6:
-        _rotular(vista, "LA CAMARA ENTREGA IMAGEN NEGRA (brillo medio %.1f "
-                        "de 255)" % brillo, 0, 0.55, (60, 60, 255))
-        for i, texto in enumerate(AVISO_IMAGEN_NEGRA, start=1):
-            _rotular(vista, texto, i, 0.45, (120, 200, 255))
-    else:
-        _rotular(vista, e["estado"], 0, 0.55,
-                 (120, 255, 180) if e["enganchado"] else (120, 200, 255))
-        if e["zona"]:
-            _rotular(vista, "buscando solo dentro del recuadro "
-                            "(a = en todo el cuadro)", 1, 0.45, (0, 255, 255))
+        _franja(vista, 0, salto * (len(AVISO_IMAGEN_NEGRA) + 1) + 12, 0.68)
+        _texto(vista, "LA CAMARA ENTREGA IMAGEN NEGRA (brillo medio %.1f de "
+                      "255)" % brillo, (12, salto), escala, TINTA["alarma"], 2)
+        for i, texto in enumerate(AVISO_IMAGEN_NEGRA, start=2):
+            _texto(vista, texto, (12, salto * i), escala * 0.85,
+                   TINTA["buscando"])
+        return salto * (len(AVISO_IMAGEN_NEGRA) + 1) + 12
 
-    cv2.putText(vista, "%ds  %d medidos  %.0f fps%s"
-                % (e["segundos"], e["cuadros"], e["fps"],
-                   "  descifrando..." if e["descifrando"] else ""),
-                (12, vista.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (160, 220, 160), 1, cv2.LINE_AA)
-    return vista
+    lineas = [(e["estado"], TINTA["bien"] if e["enganchado"]
+               else TINTA["buscando"])]
+    if e["zona"]:
+        lineas.append(("buscando solo dentro del recuadro amarillo  "
+                       "([a] = en todo el cuadro)", TINTA["aviso"]))
+    lineas.append(("%ds  ·  %d cuadros medidos  ·  %.0f fps%s"
+                   % (e["segundos"], e["cuadros"], e["fps"],
+                      "  ·  descifrando..." if e["descifrando"] else
+                      "  ·  buscando..." if e["buscando"] else ""),
+                   TINTA["texto"]))
+    alto_panel = salto * len(lineas) + 12
+    _franja(vista, 0, alto_panel, 0.6)
+    for i, (texto, color) in enumerate(lineas, start=1):
+        _texto(vista, _recortar(texto, ancho - 24, escala), (12, salto * i),
+               escala, color, 2 if i == 1 else 1)
+    return alto_panel
 
 
 def _pedir_zona(cuadro):
@@ -3155,10 +3418,14 @@ def _pedir_zona(cuadro):
 
     Se marca sobre una copia reducida para que el cuadro quepa en pantalla.
     """
-    esc = min(1.0, 640.0 / cuadro.shape[1])
+    esc = min(1.0, float(ANCHO_VENTANA_VIVO) / cuadro.shape[1])
+    vista = cv2.resize(cuadro, None, fx=esc, fy=esc)
+    _franja(vista, 0, 34, 0.65)
+    _texto(vista, "Encierra las DOS luces con el mouse y pulsa Enter  "
+                  "(Esc = dejarlo como estaba)", (12, 24), 0.5,
+           TINTA["aviso"], 1)
     cv2.namedWindow("donde buscar las luces", cv2.WINDOW_NORMAL)
-    x, y, w, h = cv2.selectROI("donde buscar las luces",
-                               cv2.resize(cuadro, None, fx=esc, fy=esc),
+    x, y, w, h = cv2.selectROI("donde buscar las luces", vista,
                                showCrosshair=True, fromCenter=False)
     cv2.destroyWindow("donde buscar las luces")
     if w <= 4 or h <= 4:
@@ -3177,6 +3444,8 @@ def _atender_teclado(e, tecla):
         return {"zona": zona} if zona else True
     if tecla == ord("a"):
         return {"zona": None}
+    if tecla == ord("z"):
+        return {"lupa": not e.get("lupa", True)}
     if tecla in (ord("+"), ord("=")):
         return {"exposicion": (e["exposicion"] or -7) + 1}
     if tecla == ord("-"):
@@ -3192,10 +3461,27 @@ def dibujar_vista(e):
 
     Se llama en cada cuadro, asi que las teclas responden al momento: buscar y
     descifrar van en otro hilo.
+
+    EL ORDEN IMPORTA. Los recuadros se pintan sobre el cuadro original, para
+    que se reduzcan con el; los ROTULOS y la lupa, despues de reducir, porque
+    si no un cuadro de 1920 encoge la letra a un tercio y no hay quien la lea
+    -que es exactamente lo que pasaba-.
     """
-    vista = _pintar_camara(e)
-    esc = min(1.0, 640.0 / vista.shape[1])
-    cv2.imshow(VENTANA_CAMARA, cv2.resize(vista, None, fx=esc, fy=esc))
+    cuadro = e["cuadro"]
+    vista = cuadro.copy()
+    _pintar_recuadros(vista, e)
+
+    esc = min(1.0, float(ANCHO_VENTANA_VIVO) / vista.shape[1])
+    if esc < 1.0:
+        vista = cv2.resize(vista, None, fx=esc, fy=esc)
+    if vista.ndim == 2:
+        vista = cv2.cvtColor(vista, cv2.COLOR_GRAY2BGR)
+
+    alto_estado = _pintar_estado(vista, e, float(cuadro.mean()))
+    _pintar_lupa(vista, cuadro, e, alto_estado)
+    _panel_de_teclas(vista)
+
+    cv2.imshow(VENTANA_CAMARA, vista)
     titulo = ("BLOQUE COMPLETO - " if e["congelado"] else "") + e["nota"]
     cv2.imshow("bloque recibido", pintar_bloque(e["grid"], titulo=titulo))
     return _atender_teclado(e, cv2.waitKey(1) & 0xFF)
@@ -3235,12 +3521,116 @@ def autoprueba():
     roto = analizar_trama("".join(malo))
     assert not roto["crc_ok"] and roto["cabecera_ok"]
 
-    print("autoprueba OK")
+    print("autoprueba OK  (secciones 1 y 3: el codigo y el decodificador)")
     print("  trama de %d bits -> %d simbolos" % (len(bits), len(simbolos)))
     print("  empieza asi: %s ..."
           % " ".join(NOMBRES_ESTADO[s] for s in simbolos[:16]))
     print("               (12 alternancias de preambulo, y AB -- es el SFD)")
     print("  a 12,5 simbolos/s son %.1f s por copia" % (len(simbolos) / 12.5))
+    return 0
+
+
+# El bloque que usan las dos autopruebas. Aparte para no repetirlo.
+GRID_PRUEBA = [["H", "O", "L", "A"], [NEGRO] * 4,
+               ["M", "U", "N", "D"], ["O", BLANCO, BLANCO, BLANCO]]
+
+
+def video_de_prueba(ruta, sps=7.0, fps=60.0, copias=2, separacion=36,
+                    radio=4, ancho=1280, alto=720, semilla=7):
+    """Fabrica un video con dos luces transmitiendo GRID_PRUEBA.
+
+    Existe para que la autoprueba pueda tocar PIXELES. La autoprueba de toda
+    la vida comprueba el codigo y el decodificador, que son las secciones
+    faciles de probar porque son puro calculo; pero la seccion 2, la que mira
+    la imagen, no se probaba NUNCA, y es justo donde estan los parametros que
+    uno toca. Con esto, cambiar un umbral y ver si algo se rompio cuesta medio
+    minuto.
+
+    La escena imita lo que se ve de verdad: fondo con estructura, algo que se
+    mueve despacio (la firma de una persona pasando) y ruido de sensor. Las
+    luces salen con NUCLEO DE COLOR y halo, no con nucleo blanco, que es lo que
+    hace falta para que el modo por color se pueda probar.
+    """
+    rng = np.random.default_rng(semilla)
+    bits = construir_trama(TIPO_BLOQUE, len(GRID_PRUEBA), len(GRID_PRUEBA[0]),
+                           celdas_a_bits(GRID_PRUEBA))
+    simbolos = codificar_linea(bits)
+    cps = fps / sps
+    total = int(len(simbolos) * copias * cps + 2.0 * fps)
+    inicio = int(0.8 * fps)
+
+    fondo = np.zeros((alto, ancho, 3), np.uint8)
+    fondo[:] = (140, 150, 160)
+    cv2.rectangle(fondo, (ancho // 6, alto // 4),
+                  (ancho * 5 // 6, alto * 4 // 5), (70, 85, 110), -1)
+    cx, cy = ancho // 2, alto // 2
+
+    escritor = cv2.VideoWriter(str(ruta), cv2.VideoWriter_fourcc(*"mp4v"),
+                               fps, (ancho, alto))
+    if not escritor.isOpened():
+        return None
+    yy, xx = np.mgrid[0:alto, 0:ancho]
+    for i in range(total):
+        f = fondo.copy()
+        # algo lento moviendose: no debe ganarle a la luz en el mapa de luz
+        px = int(ancho * 0.2 + (i * 1.5) % (ancho * 0.5))
+        cv2.rectangle(f, (px, cy - 60), (px + 40, cy + 60), (60, 60, 70), -1)
+        k = int((i - inicio) / cps)
+        estado = (simbolos[k % len(simbolos)]
+                  if 0 <= k < len(simbolos) * copias else APAGADO)
+        capa = f.astype(np.float32)
+        for dx, color, encendida in (
+                (0, (40, 40, 255), estado in (LUZ_A, AMBAS)),
+                (separacion, (40, 255, 40), estado in (LUZ_B, AMBAS))):
+            if not encendida:
+                continue
+            d2 = (xx - (cx + dx)) ** 2 + (yy - cy) ** 2
+            halo = np.exp(-d2 / (2.0 * (radio * 3.0) ** 2))
+            nucleo = np.exp(-d2 / (2.0 * radio ** 2))
+            for c in range(3):
+                capa[:, :, c] += (halo * 0.85 + nucleo) * color[c]
+        capa += rng.normal(0, 2.0, capa.shape)
+        escritor.write(np.clip(capa, 0, 255).astype(np.uint8))
+    escritor.release()
+    return ruta
+
+
+def autoprueba_pdi():
+    """Fabrica un video, lo descifra y comprueba que sale el mismo bloque.
+
+    Es la red de seguridad de la seccion 2: si se toca un umbral, una fraccion
+    o el modo de croma, esto dice en medio minuto si se rompio algo.
+    """
+    import tempfile
+    print("\nautoprueba de PDI: fabricando un video de prueba...")
+    carpeta = tempfile.mkdtemp(prefix="rx_camara_")
+    ruta = Path(carpeta) / "prueba.mp4"
+    if video_de_prueba(ruta) is None:
+        print("  no se pudo escribir el video (falta el codec mp4v); se salta")
+        return 0
+
+    fallos = []
+    for nombre, sep in (("dos luces separadas", 36),
+                        ("dos luces fundidas en un punto", 5)):
+        if sep != 36:
+            video_de_prueba(ruta, separacion=sep, radio=3)
+        t0 = time.time()
+        grid, nota, _, _ = procesar_video(str(ruta), verboso=False)
+        marca = "OK " if grid == GRID_PRUEBA else "FALLO"
+        if grid != GRID_PRUEBA:
+            fallos.append(nombre)
+        print("  %-32s %s  (%.0f s)  %s"
+              % (nombre, marca, time.time() - t0, nota.split("\n")[0][:46]))
+
+    try:
+        ruta.unlink()
+        Path(carpeta).rmdir()
+    except OSError:
+        pass
+    if fallos:
+        print("  FALLARON: %s" % ", ".join(fallos))
+        return 1
+    print("  autoprueba de PDI OK: la cadena entera funciona sobre pixeles")
     return 0
 
 
@@ -3269,9 +3659,38 @@ def _argumentos():
                     help="simbolos/s del transmisor, o 'auto' para medirlos "
                          "sobre la señal")
     ap.add_argument("--guardar", help="guarda el bloque recibido en este .png")
+    ap.add_argument("--zona", default=None,
+                    help='donde buscar las luces, "x,y,w,h" en pixeles del '
+                         'cuadro original. Evita tener que marcarlo con el '
+                         'mouse cada vez que se prueba el mismo video')
+    ap.add_argument("--sin-zona", dest="sin_zona", action="store_true",
+                    help="no preguntar donde buscar: buscar en todo el cuadro. "
+                         "Hace falta para automatizar y para correr sin "
+                         "pantalla, donde la ventana de seleccion no abre")
+    ap.add_argument("--banco", default=None,
+                    help="descifra TODOS los videos de esa carpeta y saca una "
+                         "tabla con el resultado y el tiempo de cada uno")
     ap.add_argument("--autoprueba", action="store_true",
                     help="comprueba la codificacion sin camara ni video")
+    ap.add_argument("--autoprueba-pdi", dest="autoprueba_pdi",
+                    action="store_true",
+                    help="ademas, fabrica un video de prueba y lo descifra: "
+                         "prueba la cadena ENTERA, con pixeles")
     return ap.parse_args()
+
+
+def leer_zona(texto):
+    """Convierte "x,y,w,h" en una tupla de enteros, o None."""
+    if not texto:
+        return None
+    try:
+        x, y, w, h = (int(round(float(v))) for v in
+                      str(texto).replace(";", ",").split(","))
+    except ValueError:
+        print("--zona no se entiende: se espera x,y,w,h  (por ejemplo "
+              "860,520,140,90)")
+        return None
+    return (x, y, w, h) if w > 4 and h > 4 else None
 
 
 def listar_camaras():
@@ -3293,12 +3712,17 @@ def listar_camaras():
     return 0
 
 
-def descifrar_archivo(ruta, simbolos, guardar=None):
+def descifrar_archivo(ruta, simbolos, guardar=None, zona=None,
+                      preguntar=True):
     """Un video grabado, de principio a fin."""
     print("Video: %s" % Path(ruta).name)
-    print("Encierra las dos luces con el mouse y pulsa Enter, o C para que "
-          "las busque solo.")
-    zona = seleccionar_zona_video(ruta)
+    if zona is None and preguntar:
+        print("Encierra las dos luces con el mouse y pulsa Enter, o C para "
+              "que las busque solo.")
+        zona = seleccionar_zona_video(ruta)
+    if zona:
+        print("Buscando solo dentro de %s  (--zona %d,%d,%d,%d para repetirlo)"
+              % (zona, zona[0], zona[1], zona[2], zona[3]))
     t0 = time.time()
     grid, nota, _, _ = procesar_video(ruta, simbolos, zona=zona)
     print("   (%.0f s)" % (time.time() - t0))
@@ -3317,6 +3741,59 @@ def descifrar_simulando(ruta, simbolos, tiempo_real=False, guardar=None):
     imprimir_bloque(grid, nota)
     mostrar_resultado(grid, nota, guardar)
     return 0
+
+
+def descifrar_banco(carpeta, simbolos, zona=None):
+    """Descifra TODOS los videos de una carpeta y saca una tabla.
+
+    Para probar de una vez una tanda de grabaciones -y para poder comparar
+    despues de tocar un parametro, que es la unica manera de saber si un
+    cambio mejora o solo mueve el problema de sitio-.
+
+    No abre ninguna ventana ni pregunta nada, asi que se puede dejar corriendo
+    y volver luego, o mandar la salida a un archivo:
+
+        python rx_camara.py --banco "mis videos" > resultados.txt
+    """
+    base = Path(carpeta)
+    if not base.is_dir():
+        print("No existe la carpeta %s" % base)
+        return 1
+    videos = sorted((f for f in base.rglob("*")
+                     if f.suffix.lower() in EXT_VIDEO),
+                    key=lambda f: f.name.lower())
+    if not videos:
+        print("No hay videos en %s" % base)
+        return 1
+
+    print("BANCO DE PRUEBAS  ·  %d videos en %s\n" % (len(videos), base))
+    print("%-38s %-9s %7s  %s" % ("video", "resultado", "tiempo", "detalle"))
+    print("-" * 108)
+    buenos, tiempo_total = 0, 0.0
+    for v in videos:
+        t0 = time.time()
+        try:
+            grid, nota, _, _ = procesar_video(str(v), simbolos, verboso=False,
+                                              zona=zona)
+        except Exception as e:                # un video roto no para la tanda
+            grid, nota = None, "error: %s" % e
+        dt = time.time() - t0
+        tiempo_total += dt
+        if grid and "CRC valido" in nota:
+            veredicto, buenos = "CRC OK", buenos + 1
+        elif grid:
+            veredicto = "parcial"
+        else:
+            veredicto = "nada"
+        print("%-38s %-9s %6.1fs  %s"
+              % (v.name[:38], veredicto, dt, nota.split("\n")[0][:52]))
+        if grid:
+            for fila in grid:
+                print("%50s%s" % ("", " ".join(fila)))
+    print("-" * 108)
+    print("%d de %d con CRC valido, en %.0f s" % (buenos, len(videos),
+                                                  tiempo_total))
+    return 0 if buenos else 1
 
 
 def descifrar_en_vivo(cual, simbolos, exposicion=None, guardar=None):
@@ -3341,13 +3818,20 @@ def descifrar_en_vivo(cual, simbolos, exposicion=None, guardar=None):
 
 def main():
     args = _argumentos()
-    if args.autoprueba:
-        return autoprueba()
+    if args.autoprueba or args.autoprueba_pdi:
+        fallo = autoprueba()
+        if args.autoprueba_pdi:
+            fallo = autoprueba_pdi() or fallo
+        return fallo
     if args.camaras:
         return listar_camaras()
 
     simbolos = (None if str(args.simbolos).strip().lower() == "auto"
                 else float(args.simbolos))
+    zona = leer_zona(args.zona)
+
+    if args.banco:
+        return descifrar_banco(args.banco, simbolos, zona)
 
     # Sin argumentos -el caso de darle al play- se pregunta que analizar, en
     # vez de asumir la camara: probar una toma grabada es lo que mas se hace.
@@ -3363,7 +3847,8 @@ def main():
         return descifrar_simulando(args.simular_vivo, simbolos,
                                    args.tiempo_real, args.guardar)
     if args.video:
-        return descifrar_archivo(args.video, simbolos, args.guardar)
+        return descifrar_archivo(args.video, simbolos, args.guardar, zona,
+                                 preguntar=not args.sin_zona)
     return descifrar_en_vivo(args.camara, simbolos, args.exposicion,
                              args.guardar)
 
