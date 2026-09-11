@@ -1,5 +1,5 @@
 /* ===========================================================================
-   relaylink.ino  --  Emisor de DOS LUCES  (v3.1)
+   relaylink.ino  --  Emisor de DOS LUCES  (v3.2)
    Sistema de Comunicacion Simple - Redes de Computadores I - UdeA 2026-2
 
    El Arduino es TONTO a proposito: solo recibe una lista de estados y los
@@ -74,14 +74,27 @@ void fijarLuces(uint8_t estado) {
 
 /* Devuelve true si llego una orden de CORTAR.
 
-   Se mira con peek(), que espia el siguiente byte sin sacarlo del buffer: si
-   no es una Z se deja donde esta y lo recoge loop() cuando toque. Solo se
-   vacia el buffer cuando SI es una Z, porque entonces todo lo que venga
+   Busca la Z en TODO lo que haya llegado, no solo en el siguiente byte. Mirar
+   solo el siguiente con peek() parecia suficiente y no lo era: si el PC manda
+   dos copias seguidas, mientras se emite la primera el byte siguiente es la X
+   de la segunda, no la Z, asi que el corte no se veia hasta terminar la copia
+   entera. Con una trama de 370 simbolos a 5 por segundo eso son 74 segundos
+   de luces que no paran.
+
+   Lo que se lee aqui se descarta a proposito: si hay una Z, todo lo que venga
    detras es de un mensaje que ya no vamos a emitir. */
 bool cortar() {
-  if (!Serial.available() || Serial.peek() != 'Z') return false;
-  while (Serial.available()) Serial.read();
-  return true;
+  bool hayZ = false;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'Z') {
+      hayZ = true;
+      iLinea = 0;                 // lo que venia a medias ya no vale
+    } else if (!hayZ && iLinea < sizeof(linea) - 1) {
+      linea[iLinea++] = c;        // no es para nosotros: que lo recoja loop()
+    }
+  }
+  return hayZ;
 }
 
 /* Espera hasta 'objetivo', vigilando el puerto serie por si hay que cortar.
@@ -177,7 +190,7 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   fijarLuces(0);
   Serial.begin(115200);
-  Serial.print(F("READY luces2 v3.1 T_SIMBOLO_US=")); Serial.println(T_SIMBOLO_US);
+  Serial.print(F("READY luces2 v3.2 T_SIMBOLO_US=")); Serial.println(T_SIMBOLO_US);
 }
 
 void loop() {

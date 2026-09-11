@@ -246,6 +246,14 @@ class TxCamara(object):
         self.arduino = None
         self.pantalla = None            # ventana del modo PANTALLA
         self.t_inicio_envio = None
+        # Los dos temporizadores de Tk que hay en marcha, para poder
+        # CANCELARLOS. Sin esto, parar() dejaba el after pendiente: volvia a
+        # disparar, se encontraba corriendo=True otra vez y arrancaba una
+        # segunda cadena de _tic en paralelo a la primera. De ahi venia que la
+        # pantalla fuera al doble de velocidad que el Arduino y que a veces no
+        # hubiera manera de detenerla.
+        self._job_tic = None
+        self._job_aviso = None
 
         self._construir()
         self.nueva_cuadricula(self.filas, self.cols)
@@ -470,7 +478,15 @@ class TxCamara(object):
         self.foco_cuadricula()
 
     def _regenerar(self):
-        """Vuelve a armar la trama a partir de la cuadricula actual."""
+        """Vuelve a armar la trama a partir de la cuadricula actual.
+
+        Lo primero es PARAR. Se llama al editar una celda, al cambiar el
+        tamaño, las copias o la velocidad, y ponia self.i = 0 sin mirar si
+        habia una emision en curso: la animacion volvia al principio y se
+        quedaba dando vueltas sin terminar nunca. Editar mientras se transmite
+        para la transmision, que es lo que uno espera.
+        """
+        self.parar()
         try:
             self.simbolos, bits, payload = simbolos_del_bloque(self.grid)
             error = None
@@ -704,13 +720,15 @@ class TxCamara(object):
                                  "confirme antes de transmitir", fg=AMBAR)
 
     def _animar_aviso(self, patron, k):
+        self._job_aviso = None
         if k >= len(patron):
             self.luz_fija = C.APAGADO
             self.refrescar()
             return
         self.luz_fija = patron[k]
         self.refrescar()
-        self.root.after(int(AVISO_T_S * 1000), self._animar_aviso, patron, k + 1)
+        self._job_aviso = self.root.after(int(AVISO_T_S * 1000),
+                                          self._animar_aviso, patron, k + 1)
 
     # ------------------------------------------------------- transmision --
     def alternar(self):
@@ -738,6 +756,7 @@ class TxCamara(object):
                 "manual." % self.velocidad)
             return
 
+        self.parar()                      # nada de cadenas viejas sueltas
         self.corriendo = True
         self.luz_fija = None
         self.i = 0
@@ -747,46 +766,88 @@ class TxCamara(object):
             self.t0 = time.time()
 
         if self.arduino:
-            # La placa recibe la trama entera de una vez y la emite ella sola;
-            # la animacion de la pantalla va en paralelo para acompañarla. Por
-            # eso parar() tiene que avisarle: la placa no se entera de que la
-            # pantalla se detuvo.
             self.arduino.velocidad(self.velocidad)
-            for _ in range(self.copias):
-                self.arduino.emitir(self.simbolos)
+            self._mandar_copia(0)
         self._tic()
         self.refrescar()
 
+    def _mandar_copia(self, k):
+        """Le pasa a la placa UNA copia de la trama, no todas de golpe.
+
+        Mandarlas todas seguidas era comodo pero rompia el PARAR: la placa se
+        queda emitiendo la primera y las demas esperan en su buffer de
+        entrada, asi que la Z de cortar queda DETRAS de ellas. El firmware
+        mira si lo siguiente que llego es una Z, y lo siguiente era la X de la
+        copia dos. Resultado: PARAR no hacia nada hasta que terminara la copia
+        en curso, que con 370 simbolos a 5 por segundo son 74 segundos.
+
+        Mandandolas de una en una, cuando toca, lo unico que puede haber en el
+        buffer es la Z. El hueco entre copias es de milisegundos y al receptor
+        le da igual: corta la grabacion en rafagas de todos modos.
+        """
+        if self.arduino and k < self.copias:
+            self.arduino.emitir(self.simbolos)
+
     def _tic(self):
-        """Un paso de la emision: avanza un simbolo y se programa el siguiente."""
-        if not self.corriendo:
+        """Un paso de la emision. Que simbolo toca lo dice EL RELOJ.
+
+        Antes cada paso programaba el siguiente a 1/velocidad de distancia y se
+        iba sumando: el retraso de Tk en cada salto se acumulaba y al cabo de
+        trescientos simbolos la pantalla iba segundos por detras de la placa,
+        que si lleva el ritmo exacto. Calculando el indice desde el reloj, la
+        pantalla se recoloca sola en cada paso y las dos van juntas.
+        """
+        self._job_tic = None
+        if not self.corriendo or not self.simbolos:
             return
-        if self.i >= len(self.simbolos):
-            self.copia_actual += 1
-            self.i = 0
-            if self.copia_actual >= self.copias:
-                self.corriendo = False
-                dt = time.time() - self.t_inicio_envio
-                self.lbl_est.config(text="TRANSMISIÓN COMPLETA en %.1f s" % dt,
-                                    fg=VERDE)
-                if self.pantalla:
-                    self._pintar_pantalla(C.APAGADO)
-                self.refrescar()
-                return
+
+        transcurrido = time.time() - self.t_inicio_envio
+        k = int(transcurrido * self.velocidad)          # simbolo global
+        copia, i = divmod(k, len(self.simbolos))
+
+        if copia >= self.copias:
+            self.corriendo = False
+            self.lbl_est.config(
+                text="TRANSMISIÓN COMPLETA en %.1f s" % transcurrido, fg=VERDE)
+            if self.pantalla:
+                self._pintar_pantalla(C.APAGADO)
+            self.refrescar()
+            return
+
+        if copia != self.copia_actual:                  # empieza otra copia
+            self.copia_actual = copia
+            self._mandar_copia(copia)
+
+        self.i = i + 1                                  # lo que ve la pantalla
         if self.pantalla:
-            self._pintar_pantalla(self.simbolos[self.i])
-        self.i += 1
+            self._pintar_pantalla(self.simbolos[i])
         self.refrescar()
-        self.root.after(int(1000.0 / self.velocidad), self._tic)
+
+        # cuando toca el simbolo siguiente, en tiempo absoluto
+        espera = (k + 1) / self.velocidad - transcurrido
+        self._job_tic = self.root.after(max(1, int(espera * 1000)), self._tic)
+
+    def _cancelar_temporizadores(self):
+        """Mata los after pendientes. Tiene que llamarse antes de arrancar
+        cualquier cosa nueva, o se acumulan cadenas en paralelo."""
+        for nombre in ("_job_tic", "_job_aviso"):
+            job = getattr(self, nombre, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, nombre, None)
 
     def parar(self):
         """Detiene la emision AQUI Y EN LA PLACA.
 
-        Lo segundo es lo que importa: al Arduino se le manda la trama entera de
-        una vez, asi que parar solo la animacion dejaria las luces conmutando
-        solas hasta el final.
+        Lo segundo es lo que importa: al Arduino se le manda la trama y el
+        solo la emite, asi que parar solo la animacion dejaria las luces
+        conmutando hasta el final.
         """
         self.corriendo = False
+        self._cancelar_temporizadores()
         if self.arduino:
             self.arduino.cortar()
         if self.pantalla:
