@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# videos de prueba generados (25-65 MB cada uno)
+camara/pruebas/*.mp4
