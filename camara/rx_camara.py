@@ -162,6 +162,25 @@ FRACCION_PIXELES_FFT = 0.05
 # de esto lo que cambia es el ruido del sensor y no hay señal que buscar.
 RECORRIDO_MINIMO_FFT = 6.0
 
+# Como se mide el parpadeo de cada pixel:
+#
+#   "fft"  transformada de Fourier del tramo entero. Da el espectro completo,
+#          asi que se puede pedir el pico en una banda y castigar la energia
+#          lenta. Necesita tener los 90 cuadros del tramo a la vez.
+#   "iir"  un paso-alto de primer orden por pixel. Solo guarda dos numeros
+#          por pixel, asi que se puede ir actualizando cuadro a cuadro sin
+#          buffer. Es la idea de "Frequency Cam" (arXiv 2211.00198), adaptada
+#          a una camara normal y a una señal de datos.
+#
+# Medido con camara/pruebas/comparar_mapas.py sobre 29 videos: los dos dan los
+# mismos picos y descifran lo mismo, y el "iir" tarda la mitad (el banco de
+# 1080p pasa de 175 s a 110 s). Si algo sale raro, "fft" es el de siempre.
+METODO_MAPA = "iir"
+
+# Cuanto tarda en asentarse la amplitud del metodo "iir", en segundos. El
+# corte del paso-alto no se pone aqui: sale de BANDA_PARPADEO[0].
+TAU_AMPLITUD_S = 0.50
+
 # Tramos del video de donde se sacan candidatas. Saltar de tramo en tramo es lo
 # que hace rapida la busqueda.
 TRAMOS_BUSQUEDA = 10
@@ -984,6 +1003,61 @@ def mapa_luz(bloque, fps, banda=BANDA_PARPADEO):
     return mapa.reshape(forma)
 
 
+def mapa_luz_iir(bloque, fps, banda=BANDA_PARPADEO):
+    """Lo mismo que mapa_luz, pero con un filtro por pixel y sin guardar nada.
+
+    Por cada pixel se llevan dos numeros que se actualizan con cada cuadro:
+
+        media      filtro de primer orden con el corte en banda[0] (2 Hz)
+        amplitud   filtro de primer orden sobre |x - media|
+
+    Restar esa media es un PASO-ALTO: lo que queda es justo lo que se mueve
+    mas rapido que una persona caminando. Su amplitud al cuadrado, por el
+    brillo al cuadrado, da la misma puntuacion que la version con transformada.
+
+    Viene de "Frequency Cam" (arXiv 2211.00198), que reconstruye el parpadeo de
+    cada pixel con filtros de primer orden en vez de transformadas. Alli
+    ademas cuentan cruces por cero para sacar LA frecuencia, y eso aqui NO
+    sirve: aquel caso son balizas que parpadean a ritmo fijo y esto es una
+    señal de datos, que no tiene una frecuencia dominante. Probado: contando
+    cruces se perdian cuatro de diecisiete videos del banco. Quedarse con la
+    energia de la banda, que es lo que hace la transformada, si funciona.
+
+    Lo que gana no es solo velocidad -la transformada enmascarada ya va bien-
+    sino que NO NECESITA BUFFER: se puede alimentar cuadro a cuadro y tener el
+    mapa siempre al dia, en vez de esperar a juntar 90 cuadros.
+    """
+    if len(bloque) < 8:
+        return np.zeros(bloque[0].shape[:2], np.float32)
+
+    def gris(f):
+        g = f.astype(np.float32)
+        return cv2.GaussianBlur(g.mean(2) if g.ndim == 3 else g, (3, 3), 0)
+
+    # corte del paso-alto en el borde bajo de la banda: tau = 1/(2*pi*f)
+    tau = 1.0 / (2.0 * math.pi * max(0.1, banda[0]))
+    alfa = 1.0 - math.exp(-1.0 / max(1.0, fps * tau))
+    beta = 1.0 - math.exp(-1.0 / max(1.0, fps * TAU_AMPLITUD_S))
+
+    media = gris(bloque[0])
+    brillo = media.copy()
+    amplitud = np.zeros_like(media)
+    for f in bloque[1:]:
+        x = gris(f)
+        np.maximum(brillo, x, out=brillo)
+        h = x - media
+        media += alfa * h
+        amplitud += beta * (np.abs(h) - amplitud)
+    return amplitud ** 2 * (brillo / 255.0) ** 2
+
+
+def mapa_de_parpadeo(bloque, fps, banda=BANDA_PARPADEO, metodo=None):
+    """El mapa de parpadeo por el metodo que diga METODO_MAPA."""
+    if (metodo or METODO_MAPA) == "iir":
+        return mapa_luz_iir(bloque, fps, banda)
+    return mapa_luz(bloque, fps, banda)
+
+
 def picos_de_luz(mapa, cuantos=4, frac=0.45, margen=2, borde=5):
     """Los puntos mas altos del mapa, separados por MANCHA y no por distancia.
 
@@ -1050,7 +1124,7 @@ def buscar_parejas(bloque, fps, escala, origen, cuantas=2, picos=6,
     """
     if len(bloque) < 20:
         return []
-    hallados = picos_de_luz(mapa_luz(bloque, fps), cuantos=picos)
+    hallados = picos_de_luz(mapa_de_parpadeo(bloque, fps), cuantos=picos)
     if not hallados:
         return []
 

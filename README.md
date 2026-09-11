@@ -411,10 +411,17 @@ ordena por en cuántos apareció cada pareja. Las hojas de un árbol parpadean a
 9 o 10 Hz igual que las luces, pero la pareja buena vuelve a salir tramo tras
 tramo en el mismo sitio.
 
-La FFT se calcula solo sobre el 5 % de píxeles que **más cambian** en el tramo.
-Que sea el que más cambia y no el que más alumbra importa: en las tomas de la
-caja la luz está en la repisa a la sombra y el 38 % del cuadro es más brillante
-que ella.
+El parpadeo se mide con un **paso-alto de primer orden por píxel**: se resta
+una media que sigue al fondo lento y lo que queda es lo que se mueve más rápido
+que una persona caminando. Dos números por píxel, sin guardar el tramo. La
+alternativa es la transformada de Fourier sobre 90 cuadros, que da lo mismo y
+tarda el doble; se cambia con `METODO_MAPA` y se comparan con
+`camara/pruebas/comparar_mapas.py`.
+
+Con la transformada, además, solo se transforma el 5 % de píxeles que **más
+cambian**. Que sea el que más cambia y no el que más alumbra importa: en las
+tomas de la caja la luz está en la repisa a la sombra y el 38 % del cuadro es
+más brillante que ella.
 
 ### Lo que se mide dentro del recuadro
 
