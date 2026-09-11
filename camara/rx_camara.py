@@ -38,8 +38,8 @@ que se puede entrar por cualquiera sin haber leido lo de abajo:
          4.1 lo que se mide de una pareja      4.4 abrir la camara
          4.2 de lo medido al bloque            4.5 la camara en vivo
          4.3 un archivo de video
-    5. INTERFAZ        elegir la fuente y pintar el resultado.
-    6. ARRANQUE
+    5. INTERFAZ        elegir la fuente, la ventana en vivo, pintar el bloque.
+    6. ARRANQUE        argumentos, autopruebas y banco de pruebas.
 
 Las 1 y 3 son puro calculo y --autoprueba las prueba enteras; la 2 es la unica
 que toca pixeles y la 5 la unica que abre ventanas. La 2 se prueba con
@@ -920,7 +920,12 @@ def reducir_para_buscar(f, zona=None):
             g, origen = recorte, (float(x), float(y))
     esc = min(1.0, float(ANCHO_BUSQUEDA) / g.shape[1])
     if esc < 1.0:
-        g = cv2.resize(g, None, fx=esc, fy=esc)
+        # INTER_AREA y no el bilineal de siempre: al reducir 1920 -> 640, el
+        # bilineal solo mira una vecindad de 2x2 y se salta la mayoria de los
+        # pixeles, asi que una luz pequeña puede caerse entre las muestras y
+        # aparecer y desaparecer segun como caiga la rejilla. INTER_AREA
+        # promedia el area, que es lo que hace un sensor.
+        g = cv2.resize(g, None, fx=esc, fy=esc, interpolation=cv2.INTER_AREA)
     gris = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY) if g.ndim == 3 else g.copy()
     return gris, 1.0 / esc, origen
 
@@ -1123,6 +1128,14 @@ def misma_pareja(punto_a, sep_a, punto_b, sep_b):
 #  3. DECODIFICADOR
 #     De "el estado de las luces en cada cuadro" a "el bloque de celdas".
 #     Aqui tampoco hay pixeles: la entrada es una lista de numeros.
+#
+#     Conviene saber una cosa que no se ve leyendo: la velocidad casi no se
+#     usa. Como el codigo de linea prohibe dos simbolos seguidos iguales, cada
+#     racha de estado constante ES un simbolo, dure lo que dure, y la
+#     secuencia se recupera contando fronteras. Los simbolos/s solo deciden
+#     que racha es demasiado corta para ser un simbolo (el filtro de glitches)
+#     y cuanto silencio separa dos rafagas. Por eso el receptor aguanta que el
+#     reloj del Arduino y el de la camara no coincidan.
 # ##########################################################################
 
 def agrupar_rachas(estados):
@@ -2645,7 +2658,11 @@ def escuchar_camara(cual=CAMARA, simbolos_por_s=None, fps_pedidos=FPS_CAMARA,
             if not ok:
                 sin_imagen += 1
                 if sin_imagen > CUADROS_PERDIDOS_MAX:
-                    escucha.nota = "se acabo la imagen de la camara"
+                    # si ya habia bloque bueno no se pisa el aviso: quedaba
+                    # "se acabo la imagen" encima de un CRC valido y parecia
+                    # que habia fallado cuando estaba descifrado
+                    if not escucha.congelado:
+                        escucha.nota = "se acabo la imagen de la camara"
                     break
                 continue
             sin_imagen = 0
@@ -3504,6 +3521,8 @@ def dibujar_vista(e):
 
 # ##########################################################################
 #  6. ARRANQUE
+#     Los argumentos, las dos autopruebas y el banco. Aqui no hay logica del
+#     receptor: solo se decide que camino tomar con lo que se pidio.
 # ##########################################################################
 
 def autoprueba():

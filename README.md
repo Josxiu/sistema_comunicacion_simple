@@ -284,90 +284,48 @@ fila: hay que **volver a subir** `relaylink.ino` (v3.1 o posterior).
 
 # Modo cámara
 
-El mismo bloque, pero leído por una cámara. Sirve para grabar la transmisión
-con un celular y descifrarla después, o para escuchar en vivo.
+El mismo bloque, leído por una cámara. Sirve para grabar la transmisión con un
+celular y descifrarla después, o para escuchar en vivo.
 
 ## Archivos
 
 | archivo | qué es |
 |---|---|
 | `camara/tx_camara.py` | **Transmisor.** Se digita la cuadrícula y las luces la emiten. |
-| `camara/rx_camara.py` | **Receptor.** Un solo archivo: no necesita ningún otro. Supone la **cámara quieta** (apoyada, trípode, en el borde de una mesa). |
-| `camara/rx_camara_con_seguimiento.py` | El mismo receptor para tomas **a pulso**: sigue las luces cuadro a cuadro. Tarda bastante más, así que solo si la cámara se mueve. |
+| `camara/rx_camara.py` | **Receptor.** Un solo archivo, no necesita ningún otro. Supone la cámara quieta. |
+| `camara/rx_camara_con_seguimiento.py` | El mismo receptor para tomas **a pulso**: sigue las luces mientras la cámara se mueve. Tarda más, así que solo si hace falta. |
+| `camara/pruebas/hacer_video_caja.py` | Genera videos de prueba con el fondo real del balcón y los halos de las dos luces. |
 
-El firmware del Arduino es **el mismo del modo manual**
-([`manual/relaylink/relaylink.ino`](manual/relaylink/relaylink.ino)), sin
-cambiarle nada: recibe una lista de estados y los sostiene el tiempo que se le
-diga. Lo único distinto es el período — aquí son decenas de milisegundos en
-vez de un segundo.
-
-Los dos se abren con el **botón de play de VS Code** y no llevan argumentos.
-
-## El transmisor
-
-Se escribe la cuadrícula igual que en el modo manual: `.` espacio `#` = negro,
-`-` `_` = blanco, letras `A..Z Ñ`, el tamaño con los botones **+** y **−**, y
-`Ctrl+Z` deshace. **F5** pasa a TRANSMITIR y **espacio** lanza la trama.
-
-La diferencia con el manual es la velocidad: aquí las luces van a 5–20 símbolos
-por segundo, así que **no las puede mover una persona**. Las mueve el Arduino,
-o el **modo PANTALLA** (F8), que parpadea dos círculos a pantalla completa para
-apuntarles la cámara y probar el sistema entero sin montar nada.
-
-**PARAR** (Esc, o el botón) para las luces de verdad, no solo la cuenta de la
-pantalla: al Arduino se le manda la trama entera de un golpe y se queda ocupado
-varios segundos, así que hay que decirle que corte.
-
-Las teclas `1 2 3 0` prenden y apagan las luces a mano sin transmitir nada
-—para apuntarlas y comprobar el cableado— y `*` manda el aviso. Son las mismas
-del receptor manual.
-
-La ventana avisa **si la velocidad elegida se pasa de lo que la cámara puede
-seguir**, que es la comprobación más útil: pasarse no da un error, da una
-grabación que no se puede descifrar, y eso no se descubre hasta después de
-transmitir.
-
-### Cuántas copias mandar
-
-**Con una basta.** El receptor corta la grabación en ráfagas y le vale con que
-una pase el CRC; comprobado sobre la grabación buena, cada copia por separado
-se descifra entera. Las copias de más son un seguro por si a una le pasa algo
-—alguien se cruza, la cámara se mueve—, no un requisito: 2 es un término medio
-cómodo y 3 solo si el enlace está feo.
-
-## El receptor
-
-Sale una ventana con los videos
-que encuentre en su carpeta (y en las subcarpetas), o se escoge otro con
-*Buscar otro archivo*. También hay botón para la cámara en vivo.
-
-Necesita dos librerías:
+Hace falta `numpy` y `opencv-python`. Funciona en Windows, macOS y Linux.
 
 ```
 python -m pip install numpy opencv-python
 ```
 
-Funciona igual en **Windows, macOS y Linux**: los backends de cámara se
-eligen según el sistema.
+El firmware del Arduino es el mismo del modo manual, sin cambiarle nada. Lo
+único distinto es el período: aquí son decenas de milisegundos.
 
-Para comprobar que la codificación quedó bien, sin cámara ni video:
+## El transmisor
 
-```
-python rx_camara.py --autoprueba
-```
+Se escribe la cuadrícula igual que en el modo manual. **F5** pasa a TRANSMITIR
+y **espacio** lanza la trama. A 5–20 símbolos por segundo no hay mano que siga
+el ritmo, así que las luces las mueve el Arduino o el **modo PANTALLA** (F8),
+que parpadea dos círculos a pantalla completa para apuntarles la cámara.
 
-Y para comprobar **la parte que mira la imagen**, que es donde están los
-parámetros que uno toca — fabrica un video de prueba y lo descifra, con las
-luces separadas y con las luces fundidas:
+**PARAR** (Esc) corta también las luces, no solo la cuenta de la pantalla: al
+Arduino se le manda la trama entera de un golpe y se queda ocupado varios
+segundos.
 
-```
-python rx_camara.py --autoprueba --autoprueba-pdi
-```
+La ventana avisa si la velocidad elegida se pasa de lo que la cámara puede
+seguir. Es la comprobación más útil, porque pasarse no da un error: da una
+grabación que no se puede descifrar, y eso no se descubre hasta después.
 
-Es la red de seguridad: si se cambia un umbral, esto dice en medio minuto si
-se rompió algo.
+**Con una copia basta.** El receptor corta la grabación en ráfagas y le vale
+con que una pase el CRC. Dos es un término medio cómodo.
 
-### Lo que se puede escribir en la línea de comandos
+## El receptor
+
+Sin argumentos sale una ventana con los videos que encuentre al lado. Lo demás:
 
 | | |
 |---|---|
@@ -375,71 +333,157 @@ se rompió algo.
 | `--camara 1` · `--camara "iriun"` | escucha en vivo (número, parte del nombre, o una URL) |
 | `--camaras` | lista las cámaras que responden |
 | `--simular-vivo "toma.mp4"` | pasa un video grabado por el camino de la cámara en vivo |
+| `--tiempo-real` | con el anterior, a la velocidad de la toma (hace falta para juzgarlo de verdad) |
 | `--zona 860,520,140,90` | dónde buscar las luces, sin marcarlo con el mouse |
 | `--sin-zona` | no preguntar: buscar en todo el cuadro |
-| `--banco "carpeta"` | descifra **todos** los videos de una carpeta y saca una tabla |
+| `--banco "carpeta"` | descifra todos los videos de una carpeta y saca una tabla |
 | `--simbolos 7` | forzar la velocidad en vez de medirla |
-| `--guardar bloque.png` | guarda el bloque recibido |
 
-El **banco** es lo que sirve para saber si un cambio mejora de verdad: se
-corre antes y después de tocar un parámetro y se comparan las dos tablas.
+Para comprobar que nada se rompió después de tocar un parámetro:
 
 ```
-python rx_camara.py --banco "mis videos" > resultados.txt
+python rx_camara.py --autoprueba --autoprueba-pdi
 ```
 
-**Todo lo ajustable está junto**, en el bloque `PARAMETROS` del principio del
-archivo: cómo están puestas las luces, la velocidad, la cámara, la exposición,
-los umbrales, y la lupa de la ventana en vivo. No hay que bajar al código para
-cambiar nada de eso.
+La primera parte revisa la codificación y el decodificador; la segunda fabrica
+un video y lo descifra, que es lo único que prueba la parte que mira la imagen.
 
-## Las dos luces: por color o por posición
+**Todo lo ajustable está junto**, en el bloque `PARAMETROS` del principio.
 
-Hay dos maneras de saber cuál de las dos luces está prendida, y cuál sirve
-depende de **cómo se vean en la imagen**, no de qué LED se compre:
+## Las dos luces
+
+Hay dos maneras de saber cuál está prendida, y cuál sirve depende de cómo se
+vean en la imagen:
 
 | | cuándo | exige |
 |---|---|---|
-| **por color** | las dos luces caen en el mismo punto de la imagen (a 300 m dos luces separadas 20 cm caen en ~2 píxeles: se funden) | colores distintos |
-| **por posición** | se ven como dos puntos separados | nada: **sirven dos luces iguales, blancas incluidas** |
+| **por posición** | se ven como dos puntos separados | nada: sirven dos luces iguales, blancas incluidas |
+| **por color** | caen en el mismo punto y se funden | colores distintos |
 
-Comprobado con videos de prueba generados a propósito:
-
-| luces | se funden en la imagen | se ven separadas |
-|---|---|---|
-| **dos colores** | ✅ por color | ✅ por posición |
-| **mismo color** | ❌ imposible | ✅ por posición |
-
-El receptor prueba las tres formas de leerlas, en este orden, y se queda con
-la primera que dé CRC válido:
+Se prueban las dos. Dentro de la primera hay a su vez dos lecturas, y el
+receptor las intenta en este orden:
 
 | | mide | cuándo manda |
 |---|---|---|
-| **quemados** | cuántos píxeles tiene **saturados** cada luz | **de día.** Con la escena iluminada el LED nunca se ve oscuro (223 a 251 al aire libre), así que el nivel no distingue nada; lo que desaparece al apagarse no es el nivel sino el **área** |
+| **quemados** | cuántos píxeles tiene saturados cada luz | de día. Con la escena iluminada el LED nunca se ve oscuro, así que el nivel no distingue nada; lo que desaparece al apagarse no es el nivel sino el **área** |
 | **brillo** | la luminancia de cada luz | de noche, o tan lejos que el LED no llega a saturar |
-| **color** | el croma del par | la **única** que sirve si se funden en un punto |
+| **color** | el croma del par | la única que sirve si se funden |
 
 ### Cuánta separación hace falta
 
-Para que se vean como dos puntos y no como uno hacen falta unos **14 px** en
-el cuadro original. Con un celular a 1080p y zoom 1×:
+Para que se vean como dos puntos hacen falta unos **14 px** en el cuadro
+original. Con un celular a 1080p y zoom 1×:
 
 ```
-separación_en_px  ≈  1500 × (separación_de_las_luces_en_m) / (distancia_en_m)
+separación_px  ≈  1500 × (separación_de_las_luces_m) / (distancia_m)
 ```
 
 O sea, **un centímetro de separación por cada metro de distancia** para llegar
-al mínimo, y el doble para ir cómodo. A 40 m eso son 40 cm entre los dos LED
-como mínimo, y mejor cerca de un metro. Por debajo de eso se funden y solo
-queda el modo por color.
+al mínimo, y el doble para ir cómodo. A 40 m eso son 40 cm entre los dos LED,
+y mejor cerca de un metro.
 
 ### Si se va a usar el modo por color
 
 Los dos LED tienen que verse **igual de brillantes** en la cámara, no solo de
 colores distintos. Si uno alumbra más, el estado "las dos encendidas" se corre
-hacia el brillante en vez de caer en el medio. El receptor lo aguanta —coloca
-las fronteras donde de verdad están las muestras, no en tercios fijos— pero
+hacia el brillante en vez de caer en el medio. El receptor lo aguanta, pero
 cuanto más parejos, más margen hay. Se ajusta con las resistencias.
+
+## Cómo encuentra las luces
+
+No hay detector de objetos: no reconoce la caja ni el poste. Busca **dos
+puntos** que cumplan cuatro cosas a la vez.
+
+1. **Que parpadeen al ritmo que toca.** Transformada de Fourier de cada píxel
+   a lo largo de 90 cuadros, mirando la amplitud entre **2 y 25 Hz**. Un LED va
+   a 5–12 Hz; una persona caminando, por debajo de 2. Lo que además tenga mucha
+   energía lenta se castiga.
+2. **Que alumbren.** El mapa se multiplica por el brillo al cuadrado.
+3. **Que estén a una distancia razonable**, entre 14 y 520 px.
+4. **Que lleven señales distintas.** Las luces salen también reflejadas en un
+   vidrio, y el reflejo parpadea igual de fuerte y al mismo ritmo. Un reflejo
+   coincide con su luz el 100 % del tiempo; las dos luces de verdad difieren en
+   un tercio de los cuadros. Sin esto, la pareja ganadora era "una luz y su
+   propio reflejo".
+
+Y por encima de todo manda la **constancia**: se catan varios tramos y se
+ordena por en cuántos apareció cada pareja. Las hojas de un árbol parpadean a
+9 o 10 Hz igual que las luces, pero la pareja buena vuelve a salir tramo tras
+tramo en el mismo sitio.
+
+La FFT se calcula solo sobre el 5 % de píxeles que **más cambian** en el tramo.
+Que sea el que más cambia y no el que más alumbra importa: en las tomas de la
+caja la luz está en la repisa a la sombra y el 38 % del cuadro es más brillante
+que ella.
+
+### Lo que se mide dentro del recuadro
+
+```
+brillo     media del 5 % de píxeles más brillantes
+quemados   cuántos píxeles pasan del umbral de saturación
+croma      (R−G)/(R+G)     roja (+) · verde (−) · las dos (~0)
+```
+
+El croma sale de una media de todo el recuadro pesada por el brillo al
+cuadrado, para que las dos luces aporten cuando están las dos encendidas.
+Dividir por (R+G) lo hace independiente de la exposición.
+
+Se resta el verde y no el azul a propósito: el LED rojo se ve **magenta** en la
+cámara, porque satura también el canal azul.
+
+### El recuadro que se marca a mano dice dónde **buscar**
+
+Con la tecla `m` en vivo, o con `--zona` en un archivo. Sirve cuando hay muchas
+cosas moviéndose alrededor, y además va más rápido. Dónde **medir** lo sigue
+decidiendo el programa.
+
+## Cuántos cuadros por segundo hacen falta
+
+Como cada símbolo se reconoce por el **cambio** de las luces, para ver un
+cambio hacen falta cuadros a los dos lados. La regla medida sobre grabaciones
+reales es de **3 cuadros por símbolo como mínimo**:
+
+| fps del video | cuadros/símbolo a 12,5 sím/s | resultado |
+|---|---|---|
+| 54,1 | 4,3 | CRC válido |
+| 27,1 | 2,2 | nada — y es el mismo video, decimado |
+| 23,8 | 1,9 | nada |
+
+O sea: **la velocidad máxima es fps/3**. A 30 fps son 10 símbolos/s; a 60, 20.
+Conviene grabar a 60 siempre que se pueda.
+
+## La cámara en vivo
+
+```
+python rx_camara.py --camaras          lista las que responden
+python rx_camara.py --camara 1         escucha esa
+```
+
+Mientras escucha: **q** sale · **r** reinicia · **m** limita la búsqueda a un
+recuadro · **a** lo quita · **z** enciende y apaga la lupa · **+** y **−**
+suben y bajan la exposición. Las teclas salen escritas en la ventana.
+
+La **lupa** es un recuadro en una esquina con la zona ampliada y los recuadros
+de medida dentro: sirve para apuntar la cámara sin acercarse a la pantalla,
+porque a 40 m las luces son cuatro píxeles.
+
+No guarda imágenes. De cada cuadro saca siete números por pareja candidata y
+tira el cuadro; la historia son los últimos 3600 (un minuto a 60 fps). Cada dos
+segundos, en otro hilo, intenta descifrar toda esa historia buscando el
+preámbulo. No hay ningún detector de "empieza un mensaje": el preámbulo y el
+CRC son el detector, así que un parpadeo al azar nunca cuadra. El bloque se
+congela en cuanto un CRC cuadra.
+
+### Conectar otra cámara
+
+| qué | cómo |
+|---|---|
+| **Celular** (lo mejor: graba a 60 fps) | una app que publique la cámara en la red — `--camara http://192.168.1.5:8080/video`. Con DroidCam, Iriun o EpocCam salen como una cámara más en `--camaras` |
+| **Réflex** | capturadora HDMI-USB, o el programa del fabricante |
+| **Cámara IP** | `--camara "rtsp://usuario:clave@192.168.1.9:554/stream1"` |
+
+Si la imagen sale negra: tapa de privacidad, otra aplicación que ya tiene la
+cámara cogida, o exposición demasiado baja.
 
 ## La codificación
 
@@ -457,11 +501,12 @@ destinos posibles, así que cada símbolo lleva un dígito en base 3. Eso tiene
 dos consecuencias que importan:
 
 * Cada frontera de símbolo se ve como un **cambio**, así que el receptor no
-  tiene que recuperar el reloj ni saber la velocidad de antemano.
+  tiene que recuperar el reloj ni saber la velocidad de antemano. Cada racha de
+  estado constante *es* un símbolo, dure lo que dure.
 * 3 bits caben en 2 dígitos base 3, o sea **1,5 bits por símbolo**. El límite
   teórico es log₂3 = 1,585: se aprovecha el 95 %.
 
-**La trama** lleva todo el bloque de una vez, no una trama por fila:
+**La trama** lleva todo el bloque de una vez:
 
 ```
 PREÁMBULO      1 2 1 2 1 2 1 2 1 2 1 2     alternancia roja/verde
@@ -474,116 +519,3 @@ CRC-16         de la cabecera y el payload
 La cabecera lleva CRC propio para que, si el payload se corrompe, todavía se
 sepan las dimensiones y se pueda pintar lo que sí llegó (las celdas perdidas
 salen en rojo).
-
-## Cuántos cuadros por segundo hacen falta
-
-Como cada símbolo se reconoce por el **cambio** de las luces, para ver un
-cambio hacen falta cuadros a los dos lados. La regla medida sobre grabaciones
-reales es de **3 cuadros por símbolo como mínimo**:
-
-| fps del video | cuadros/símbolo a 12,5 sím/s | resultado |
-|---|---|---|
-| 54,1 | 4,3 | ✅ CRC válido |
-| 27,1 | 2,2 | ❌ nada — **y es el mismo video, decimado** |
-| 23,8 | 1,9 | ❌ nada |
-
-O sea: **la velocidad máxima es fps/3**. A 30 fps son 10 símbolos/s; a 60 fps,
-20. Si no engancha, el programa lo dice con esos números en vez de dejar a uno
-adivinando.
-
-Conviene grabar a 60 fps siempre que se pueda. No hace falta que haya luz
-ambiente: lo que manda es la tasa de cuadros.
-
-## Cómo encuentra las luces
-
-**No hay ningún detector de objetos.** El programa no reconoce la caja, ni el
-poste, ni la ventana: busca **dos puntos** que cumplan cuatro cosas a la vez.
-
-**1. Que parpadeen al ritmo que toca.** Se calcula la transformada de Fourier
-de cada píxel a lo largo de 90 cuadros y se mira la amplitud entre **2 y
-25 Hz**. Un LED va a 5–12 Hz; una persona caminando, por debajo de 2 Hz. Lo
-que además tenga mucha energía lenta —la firma del que camina— se castiga.
-
-**2. Que alumbren.** El mapa se multiplica por el **brillo al cuadrado**: el
-LED satura y el resto de la escena no.
-
-> Antes se usaba la desviación estándar temporal, y al aire libre no servía:
-> ganaba siempre la gente que pasaba, que ocupa muchísima más imagen que un
-> LED de 5 px. Con el ritmo y el brillo juntos, la luz sale primera.
-
-**3. Que estén a una distancia razonable** el uno del otro (entre 14 y 520 px,
-`SEPARACION_LUCES_PX`).
-
-**4. Que lleven señales DISTINTAS.** Las luces salen también reflejadas —en un
-vidrio, en el piso— y el reflejo parpadea igual de fuerte y al mismo ritmo. Un
-reflejo coincide con su luz el 100 % del tiempo; las dos luces de verdad
-difieren en un tercio de los cuadros. Sin este filtro, la pareja ganadora era
-"una luz y su propio reflejo", que no dice nada.
-
-Y por encima de todo eso manda la **constancia**: se catan varios tramos del
-video y se ordena por en cuántos apareció cada pareja. Las hojas de un árbol
-parpadean a 9 o 10 Hz igual que las luces, pero la pareja buena vuelve a salir
-tramo tras tramo en el mismo sitio y una sombra entre las hojas sale una vez y
-no vuelve.
-
-Además, los **picos sueltos** más fuertes se proponen siempre, aunque no
-puedan emparejarse con nadie: si las dos luces están fundidas en un punto, ese
-punto es todo lo que hay, y hay que leerlo por color.
-
-### Lo que se mide dentro del recuadro
-
-```
-brillo     media del 5 % de píxeles más brillantes
-quemados   cuántos píxeles pasan del umbral de saturación
-luminancia (R+G+B)/3                apagado o encendido
-croma      (R−G)/(R+G)              roja (+) · verde (−) · las dos (~0)
-```
-
-El croma se saca de una media de todo el recuadro **pesada por el brillo al
-cuadrado**, para que las dos luces aporten cuando están las dos encendidas.
-Dividir por (R+G) lo hace independiente de la exposición.
-
-Se resta el verde y no el azul a propósito: el LED rojo se ve **magenta** en la
-cámara, porque satura también el canal azul.
-
-### El recuadro que se marca a mano dice **dónde buscar**, no dónde medir
-
-Con la tecla `m` en vivo, o con `--zona x,y,w,h` en un archivo, se limita la
-zona en la que se buscan las luces. Sirve cuando hay muchas cosas moviéndose
-alrededor, y además va más rápido. Dónde **medir** lo sigue decidiendo el
-programa, que lo hace mejor que un rectángulo a pulso.
-
-## La cámara en vivo
-
-```
-python rx_camara.py --camaras          lista las que responden y su número
-python rx_camara.py --camara 1         escucha esa
-```
-
-Mientras escucha: **q** sale · **r** reinicia la escucha · **m** limita la
-búsqueda a un recuadro · **a** vuelve a buscar en todo el cuadro · **z**
-enciende y apaga la lupa · **+** y **−** suben y bajan la exposición. Las
-teclas salen escritas en la propia ventana.
-
-La **lupa** es un recuadro en una esquina con la zona ampliada y los recuadros
-de medida dentro: sirve para apuntar la cámara sin acercarse a la pantalla,
-porque a 40 m las luces son cuatro píxeles y en la vista normal no se ve si el
-programa las cogió o está midiendo dos metros al lado. Se configura en
-`PARAMETROS` (`LUPA_*`). El descifrado corre aparte, así que la ventana responde
-siempre. El bloque se **congela** en cuanto un CRC cuadra, para no pisarlo con
-una lectura peor.
-
-Si la imagen sale negra, el programa lo dice en pantalla con las causas
-probables: tapa de privacidad del portátil, otra aplicación que ya tiene la
-cámara cogida, o exposición demasiado baja.
-
-### Conectar otra cámara
-
-| qué | cómo |
-|---|---|
-| **Celular** (lo mejor: graba a 60 fps) | una app que publique la cámara en la red — `--camara http://192.168.1.5:8080/video`. Con DroidCam, Iriun o EpocCam ni eso: salen como una cámara más en `--camaras` |
-| **Réflex o cámara de video** | capturadora HDMI-USB, o el programa del fabricante (Webcam Utility); luego el número que diga `--camaras` |
-| **Cámara IP** | `--camara "rtsp://usuario:clave@192.168.1.9:554/stream1"` |
-
-Sea cual sea, lo único que decide la velocidad máxima es que entregue **60
-cuadros por segundo de verdad**.
