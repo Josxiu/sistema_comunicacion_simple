@@ -1785,7 +1785,45 @@ def descifrar_medidas(lecturas, fps, simbolos_por_s=None, avisar=None):
                 mejor = (info, texto)
     if mejor:
         return mejor
-    return None, "nada cuadra todavia: %d cuadros a %.0f fps" % (largo, fps)
+    return None, ("nada cuadra todavia: %d cuadros a %.0f fps%s"
+                  % (largo, fps, _diagnostico_de_señal(lecturas)))
+
+
+# Recorrido de brillo, en niveles, por debajo del cual la luz practicamente no
+# modula el pixel y no hay nada que descifrar. En una toma buena son 50-60.
+RECORRIDO_SANO = 25.0
+
+
+def _diagnostico_de_señal(lecturas):
+    """Por que no cuadro, mirando la fuerza de la señal.
+
+    Sin esto el receptor decia siempre lo mismo -"nada cuadra"- tanto si el
+    video estaba bien y fallaba el descifrado como si las luces salian lavadas
+    en la grabacion, que no tiene arreglo desde aqui. Paso de verdad: una toma
+    con las luces sobreexpuestas daba 13 niveles de recorrido donde la buena
+    daba 56, y se perdio un rato buscando el fallo en el codigo.
+    """
+    # Solo la pareja MEJOR CLASIFICADA, que es la que mas pinta de transmisor.
+    # Mirando todas, cualquier reflejo brillante del fondo decia que la señal
+    # llegaba bien cuando la de las luces no llegaba.
+    mejor = 0.0
+    quemada = False
+    for l in lecturas[:1]:
+        for serie in (l.brillo_a, l.brillo_b):
+            if len(serie) < MUESTRAS_MINIMAS:
+                continue
+            p10, p90 = recorrido(serie)
+            if p90 - p10 > mejor:
+                mejor, quemada = p90 - p10, p90 > 235
+    if mejor <= 0:
+        return ""
+    if mejor >= RECORRIDO_SANO:
+        return "  [la señal llega bien: %.0f niveles de recorrido]" % mejor
+    return ("\n              Las luces apenas modulan la imagen: %.0f niveles "
+            "de recorrido, y una toma buena da 50 o 60.%s Esto no se arregla "
+            "descifrando: hay que volver a grabar con menos exposicion, o mas "
+            "cerca, o con las luces mas fuertes."
+            % (mejor, "  Ademas la zona sale quemada." if quemada else ""))
 
 
 # ---------------------------------------- 4.3 un archivo de video ---------
@@ -1852,11 +1890,53 @@ def abrir_video(ruta, solo_luz=True):
     # Sin convertir, algunos formatos entregan el buffer YUV entero (una vez y
     # media de alto) en vez del plano Y suelto. Si no llega una imagen de un
     # solo canal y del alto que toca, no se arriesga nada y se lee normal.
-    if not ok or f is None or f.ndim != 2 or abs(f.shape[0] - alto) > 2:
+    sirve = ok and f is not None and f.ndim == 2 and abs(f.shape[0] - alto) <= 2
+    if sirve:
+        sirve = _plano_creible(ruta, f)
+    if not sirve:
         cap.release()
         return cv2.VideoCapture(str(ruta)), False
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     return cap, True
+
+
+def _plano_creible(ruta, plano, minimo=0.9):
+    """Comprueba que el plano crudo se parece de verdad a la luminancia.
+
+    Tener la forma correcta no basta, y esto costo una tarde. Un video de 10
+    BITS por canal -lo que graba un iPhone moderno en HEVC, y lo que sale de
+    cualquier grabacion HDR- lleva el plano Y en palabras de 16 bits, pero
+    OpenCV lo entrega como uint8 con las mismas filas y columnas: cada pixel
+    acaba siendo MEDIO numero, el byte alto de uno y el bajo de otro. Pasaba
+    las dos comprobaciones de arriba y se colaba como si fuera luminancia.
+    Medido sobre el mismo cuadro del mismo video:
+
+        8 bits   correlacion con el gris de verdad   1,000
+        10 bits  correlacion                         0,029   <- basura
+
+    Y con basura no falla nada: el receptor busca luces donde no las hay y
+    termina diciendo "nada cuadra", que es justo lo que pasaba con los .MOV
+    del telefono.
+
+    En vez de ir enumerando formatos -que siempre aparece uno nuevo- se
+    comprueba la propiedad que hace falta: se lee el mismo cuadro por el camino
+    normal y se correlacionan. Cuesta descodificar un cuadro, una vez.
+    """
+    otra = cv2.VideoCapture(str(ruta))
+    try:
+        ok, color = otra.read()
+    finally:
+        otra.release()
+    if not ok or color is None or color.ndim != 3:
+        return False
+    gris = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    if gris.shape != plano.shape:
+        return False
+    a = plano.astype(np.float32).ravel()
+    b = gris.astype(np.float32).ravel()
+    if a.std() < 1e-6 or b.std() < 1e-6:
+        return False
+    return float(np.corrcoef(a, b)[0, 1]) >= minimo
 
 
 def tramos_de_video(cap, tramos, largo, zona=None):
@@ -2824,7 +2904,14 @@ def simular_vivo(ruta, simbolos_por_s=None, al_actualizar=None,
 #     1 a 4 siguen funcionando desde otro programa.
 # ##########################################################################
 
-EXT_VIDEO = (".mp4", ".avi", ".mov", ".mkv", ".m4v")
+EXT_VIDEO = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".m2ts", ".webm")
+
+# Los mismos, como patrones para el cuadro de dialogo de Windows. Van en las
+# DOS cajas porque ahi el filtro distingue mayusculas: el telefono guarda
+# IMG_1234.MOV y con "*.mov" a secas no aparecia en la lista, habia que poner
+# "todos los archivos" para verlo.
+PATRONES_VIDEO = " ".join(
+    e2 for e in EXT_VIDEO for e2 in ("*" + e, "*" + e.upper()))
 
 # Paleta de las dos ventanas, en un solo sitio: cambiar un color aqui las
 # cambia las dos. tkinter se importa dentro de cada funcion a proposito, para
@@ -3077,7 +3164,7 @@ def elegir_fuente():
     def otro():
         r = filedialog.askopenfilename(
             title="Escoge un video",
-            filetypes=[("Videos", "*.mp4 *.avi *.mov *.mkv *.m4v"),
+            filetypes=[("Videos", PATRONES_VIDEO),
                        ("Todos", "*.*")])
         if r:
             elegido["video"] = r
