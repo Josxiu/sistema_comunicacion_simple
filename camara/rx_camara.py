@@ -74,6 +74,7 @@ Cosas a tener en cuenta:
 """
 
 import argparse
+import itertools
 import math
 import os
 import sys
@@ -247,6 +248,47 @@ FRAC_GLITCH = 0.45
 
 # Factores del periodo de simbolo que se prueban si el nominal no cuadra.
 BARRIDO = [0.55, 0.7, 0.85, 1.0, 1.2, 1.45, 1.75, 2.1]
+
+# --- DECISION BLANDA -------------------------------------------------------
+# Que hacer con las rachas que caen JUSTO en el umbral de glitch.
+#
+# simbolos_estables decide a lo bruto: mas corta que FRAC_GLITCH de simbolo, a
+# la basura; mas larga, simbolo. En el medio no hay forma de saberlo, y no es
+# una duda inofensiva: como cada simbolo lleva un trit y los trits van en
+# cadena, equivocarse UNA vez corre todo lo que viene detras y el CRC falla sin
+# decir donde. La trama son unos 370 simbolos; basta una racha mal resuelta.
+#
+# Con esto encendido, las rachas dudosas no se resuelven: se prueban las dos
+# posibilidades y decide el CRC, que para eso esta. Solo se hace cuando la
+# decision dura ya fallo, asi que en el caso normal no cuesta nada.
+#
+# VA APAGADO, Y CONVIENE SABER POR QUE. Suena a que deberia ayudar y no ayuda,
+# porque ataca una duda que en la practica casi no aparece. Medido con
+# camara/pruebas/escalera.py sobre un video real degradado a proposito y sobre
+# los cinco casos que hoy no cuadran:
+#
+#     escalera de degradacion   dura 7/8    blanda 7/8
+#     casos que fallan          rescatados 0 de 5
+#     coste en los fallos       entre 50% y 70% mas lento
+#
+# La razon esta a la vista en cuanto se cuentan los simbolos. A 2,1 cuadros por
+# simbolo salen 242 simbolos donde una copia lleva 334: no es que noventa esten
+# en duda, es que NO SE MUESTREARON NUNCA. Y eso no lo arregla dudar sobre el
+# umbral de glitch, que era lo que hace esto; haria falta inventarse los que
+# faltan. Por debajo de tres cuadros por simbolo no hay decodificador que
+# valga, que es justo lo que dice la regla de fps/3.
+#
+# Se deja el codigo porque la medida vale mas que la intuicion: si alguien
+# vuelve a pensar que esto tenia que ayudar, aqui esta el numero.
+DECISION_BLANDA = False
+
+# Ancho de la zona de duda, en fracciones de simbolo a cada lado del umbral.
+# Con 0.25 y el umbral en 0.45, se dudan las rachas entre 0.20 y 0.70 simbolos.
+BANDA_DE_DUDA = 0.25
+
+# Tope de combinaciones que se prueban. Cada una cuesta un descifrado, que son
+# microsegundos, pero sin tope una traza ruidosa se va a millones.
+MAX_COMBINACIONES = 96
 
 # --- CAMARA EN VIVO -----------------------------------------------------
 # Cual camara: numero (0 = la primera), parte del nombre ("iriun") o URL
@@ -1260,11 +1302,61 @@ def separar_rafagas(estados, cuadros_por_simbolo):
     return [t for t in trozos if len(t) > 20]
 
 
+def rachas_dudosas(rachas, cps, frac=FRAC_GLITCH, banda=None):
+    """Cuales rachas caen tan cerca del umbral que no se sabe que son.
+
+    Devuelve sus indices, de la mas dudosa a la menos: primero las que estan
+    justo encima del umbral, que son donde mas se acierta al cambiar de idea.
+    """
+    umbral = max(1.0, cps * frac)
+    ancho = (banda if banda is not None else BANDA_DE_DUDA) * cps
+    dudosas = [(abs(n - umbral), i) for i, (_, n) in enumerate(rachas)
+               if abs(n - umbral) <= ancho]
+    dudosas.sort()
+    return [i for _, i in dudosas]
+
+
+def secuencias_blandas(estados, cps, maximo=None):
+    """Va soltando secuencias de simbolos, de la mas probable a la menos.
+
+    La primera es la de siempre, la de la decision dura. Las demas salen de
+    cambiar de idea en las rachas dudosas: primero en una, luego en dos, y asi.
+    Las combinaciones se generan en orden de cuantas decisiones se cambian,
+    porque equivocarse en una racha es mucho mas probable que en tres.
+    """
+    maximo = maximo or MAX_COMBINACIONES
+    rachas = agrupar_rachas(estados)
+    umbral = max(1.0, cps * FRAC_GLITCH)
+    base = [n >= umbral for _, n in rachas]          # la decision dura
+    dudosas = rachas_dudosas(rachas, cps)
+
+    def montar(quedan):
+        return colapsar([s for (s, _), q in zip(rachas, quedan) if q])
+
+    yield montar(base)
+    if not dudosas:
+        return
+    sacadas = 1
+    for cuantas in range(1, len(dudosas) + 1):
+        for combo in itertools.combinations(dudosas, cuantas):
+            cambiada = list(base)
+            for i in combo:
+                cambiada[i] = not cambiada[i]
+            yield montar(cambiada)
+            sacadas += 1
+            if sacadas >= maximo:
+                return
+
+
 def probar_periodos(estados, cuadros_nominal):
     """Barre periodos candidatos y devuelve el primer analisis con CRC valido.
 
     Si el periodo nominal no cuadra (la camara entrego menos fps de los
     pedidos, por ejemplo) uno de los factores del BARRIDO lo compensa.
+
+    Primero con la decision dura para todos los factores, que es el camino
+    rapido y el que acierta casi siempre. Solo si ninguno cuadra se vuelve con
+    la decision blanda, probando las rachas dudosas de las dos maneras.
     """
     mejor_parcial = None
     for factor in BARRIDO:
@@ -1282,6 +1374,24 @@ def probar_periodos(estados, cuadros_nominal):
             return info, cps
         if info.get("cabecera_ok") and mejor_parcial is None:
             mejor_parcial = (info, cps)
+
+    if DECISION_BLANDA:
+        for factor in BARRIDO:
+            cps = cuadros_nominal * factor
+            if cps < 1.2:
+                continue
+            for sec in secuencias_blandas(estados, cps):
+                if len(sec) < 20:
+                    continue
+                bits, _ = decodificar_linea(sec)
+                if bits is None:
+                    continue
+                info = analizar_trama(bits)
+                if info.get("crc_ok"):
+                    return info, cps
+                if info.get("cabecera_ok") and mejor_parcial is None:
+                    mejor_parcial = (info, cps)
+
     return mejor_parcial if mejor_parcial else (None, None)
 
 

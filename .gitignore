@@ -3,3 +3,4 @@ __pycache__/
 
 # videos de prueba generados (25-65 MB cada uno)
 camara/pruebas/*.mp4
+camara/pruebas/escalera/
