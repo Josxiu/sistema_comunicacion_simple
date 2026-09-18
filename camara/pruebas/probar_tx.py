@@ -1,25 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Prueba el transmisor sin Arduino y sin mirar la pantalla.
-
-    python probar_tx.py
-
-Ejercita los fallos que aparecieron usandolo: que PARAR no paraba, que la
-cuadricula se ponia a parpadear sola al editar, que el aviso pisaba la
-transmision, y que la pantalla iba al doble de velocidad que la placa. Todos
-salian de temporizadores de Tk que se quedaban vivos y de mandarle a la placa
-las copias de golpe.
-
-La placa se sustituye por una falsa que apunta lo que le mandan, asi que esto
-corre en cualquier sitio. Hace falta una pantalla; en un servidor, con
-    xvfb-run -a python probar_tx.py
-"""
-import sys
-import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import tkinter as tk                                          # noqa: E402
-import tx_camara as T                                         # noqa: E402
+"""Ejercita los fallos del transmisor: parar de verdad, no arrancar dos
+cadenas, no reiniciarse al editar, y que pantalla y placa vayan juntas."""
+import sys, time
+sys.path.insert(0, "/home/user/sistema_comunicacion_simple/camara")
+import tkinter as tk
+import tx_camara as T
 
 
 class ArduinoFalso:
@@ -166,10 +151,28 @@ def main():
     app.arduino.ordenes.clear()
     app.copias = 3
     app.emitir()
+    t0 = app.t_inicio_envio
     esperar(root, n_simbolos / app.velocidad * 1.2)
     enviadas = app.arduino.cuenta("emitir")
     comprobar("a la segunda copia van 2 enviadas, no 3",
               enviadas == 2, "%d" % enviadas)
+
+    # --- 8. la copia siguiente sale con el hueco pedido -------------------
+    # Si sale pegada a la frontera, con que el reloj de la placa vaya un pelo
+    # por detras del del PC la orden le llega mientras aun emite: se le queda
+    # en el buffer por delante de la Z y PARAR no surte efecto hasta que acabe
+    # la copia. El hueco es el margen para esa diferencia de relojes, que desde
+    # aqui no se ve -la placa es de mentira y no tiene reloj propio-, asi que
+    # lo que se comprueba es que el margen configurado se respete de verdad.
+    print("\n8. la copia siguiente sale con el hueco pedido, no pegada")
+    envios = [t for q, t in app.arduino.ordenes if q == "emitir"]
+    frontera = t0 + n_simbolos / app.velocidad
+    hueco = (envios[1] - frontera) * app.velocidad if len(envios) > 1 else -1
+    comprobar("la copia 2 espera los %.2f simbolos de HUECO_ENTRE_COPIAS"
+              % T.HUECO_ENTRE_COPIAS,
+              hueco >= T.HUECO_ENTRE_COPIAS, "hueco %.2f simbolos" % hueco)
+    comprobar("y no se pasa de frenada (menos de un simbolo de mas)",
+              hueco < T.HUECO_ENTRE_COPIAS + 1.0, "hueco %.2f simbolos" % hueco)
     app.parar()
 
     root.destroy()
