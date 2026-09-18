@@ -78,6 +78,20 @@ VELOCIDAD_MAX = 20.0
 # una basta, las demas son un seguro.
 COPIAS = 2
 
+# Cuanto se espera, en fracciones de simbolo, antes de pasarle a la placa la
+# copia siguiente. No es un capricho: mientras la placa este emitiendo, lo que
+# le llegue se queda en su buffer, y si ahi hay una orden esperando, la Z de
+# cortar queda detras y PARAR no surte efecto hasta que acabe la copia.
+#
+# Mandandola un pelin DESPUES de la frontera, la placa ya termino y su buffer
+# esta vacio, asi que la Z entra sola. El hueco son milisegundos de luces
+# apagadas entre copia y copia, que al receptor le da igual porque corta la
+# grabacion en rafagas de todos modos.
+#
+# Con el firmware v3.2 esto sobra -alli la Z se busca en todo lo que haya
+# llegado- pero asi PARAR funciona tambien con la placa sin reprogramar.
+HUECO_ENTRE_COPIAS = 0.35
+
 # Cuadros por simbolo que necesita la camara del receptor. Sirve para avisar
 # en la propia ventana si la velocidad elegida se pasa de lo que puede seguir.
 # Es el mismo numero que usa rx_camara.py, y esta medido, no inventado.
@@ -240,6 +254,7 @@ class TxCamara(object):
         self.velocidad = SIMBOLOS_POR_SEGUNDO
         self.copias = COPIAS
         self.copia_actual = 0
+        self.copias_enviadas = 0        # cuantas se le han pasado a la placa
         self.i = 0                      # simbolo que toca
         self.corriendo = False
         self.luz_fija = None            # estado puesto a mano, o None
@@ -765,9 +780,11 @@ class TxCamara(object):
         if self.t0 is None:
             self.t0 = time.time()
 
+        self.copias_enviadas = 0
         if self.arduino:
             self.arduino.velocidad(self.velocidad)
             self._mandar_copia(0)
+            self.copias_enviadas = 1
         self._tic()
         self.refrescar()
 
@@ -814,9 +831,13 @@ class TxCamara(object):
             self.refrescar()
             return
 
-        if copia != self.copia_actual:                  # empieza otra copia
-            self.copia_actual = copia
+        self.copia_actual = copia
+        # La copia siguiente se manda un poco DESPUES de la frontera, cuando la
+        # placa ya termino la anterior: ver HUECO_ENTRE_COPIAS.
+        dentro = transcurrido * self.velocidad - copia * len(self.simbolos)
+        if copia >= self.copias_enviadas and dentro >= HUECO_ENTRE_COPIAS:
             self._mandar_copia(copia)
+            self.copias_enviadas = copia + 1
 
         self.i = i + 1                                  # lo que ve la pantalla
         if self.pantalla:
