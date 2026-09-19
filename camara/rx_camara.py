@@ -2199,6 +2199,59 @@ def fijar_exposicion(cap, exposicion):
         return False
 
 
+def leer_cuadro(cap):
+    """Lee un cuadro y dice si la camara lo entrego BIEN.
+
+    cap.read() no solo devuelve False cuando no hay imagen: tambien puede
+    reventar. Pasa con las camaras virtuales -DroidCam, Iriun, OBS, la camara
+    del celular en general- cuando el tamano que la camara DICE tener no es el
+    del buffer que entrega: OpenCV arma la matriz con el ancho anunciado sobre
+    menos bytes de los que hacen falta y aborta con
+
+        (-215) _step >= minstep in function 'cv::Mat::Mat'
+
+    Eso no es un fallo del programa, es un cuadro que hay que tirar (y pasa
+    tambien a mitad de escucha, por ejemplo si se gira el celular y DroidCam
+    cambia de formato en caliente). Asi que aqui se trata igual que un cuadro
+    perdido y la escucha sigue, en vez de morirse con un traceback.
+    """
+    try:
+        ok, cuadro = cap.read()
+    except cv2.error:
+        return False, None
+    return bool(ok), cuadro
+
+
+def abrir_por(cual, backend, fps_pedidos=FPS_CAMARA):
+    """Abre la camara por UN backend, a 1280x720 si puede, o None si no sirve.
+
+    El tamano se pide ANTES del primer read, y ahi esta toda la gracia. Pedirlo
+    despues, con el stream ya andando, es lo que rompia DroidCam: el driver
+    acepta el cambio, sigue entregando el buffer del tamano viejo, y el read()
+    siguiente revienta con el "_step >= minstep" de arriba. Pedido antes, el
+    mismo backend que se quedaba en 640x480 entrega 1280x720 sin rechistar.
+
+    Si aun asi no hay imagen, 720p no es un modo que esta camara sepa dar por
+    aqui: se reabre sin forzar nada y se acepta lo que traiga de fabrica.
+    """
+    cap = cv2.VideoCapture(int(cual), backend)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, fps_pedidos)
+    if leer_cuadro(cap)[0]:
+        return cap
+    cap.release()
+    cap = cv2.VideoCapture(int(cual), backend)
+    cap.set(cv2.CAP_PROP_FPS, fps_pedidos)
+    if cap.isOpened() and leer_cuadro(cap)[0]:
+        return cap
+    cap.release()
+    return None
+
+
 def abrir_camara(cual, fps_pedidos=FPS_CAMARA, exposicion=EXPOSICION_CAMARA):
     """Abre una camara por indice (0, 1, ...) o por URL, y la deja lista.
 
@@ -2209,20 +2262,16 @@ def abrir_camara(cual, fps_pedidos=FPS_CAMARA, exposicion=EXPOSICION_CAMARA):
     """
     if isinstance(cual, str) and not str(cual).isdigit():
         cap = cv2.VideoCapture(cual, cv2.CAP_FFMPEG)          # celular o IP
+        cap.set(cv2.CAP_PROP_FPS, fps_pedidos)
     else:
         orden = backends_de_camara()
         cap = None
         for backend in orden:
-            prueba = cv2.VideoCapture(int(cual), backend)
-            if prueba.isOpened() and prueba.read()[0]:
-                cap = prueba
+            cap = abrir_por(cual, backend, fps_pedidos)
+            if cap is not None:
                 break
-            prueba.release()
         if cap is None:                    # ninguno abrio: se devuelve cerrada
             return cv2.VideoCapture(int(cual), orden[0])
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_FPS, fps_pedidos)
     # Solo si se pide: en un cuarto normal una exposicion de -7 deja la imagen
     # practicamente negra, y eso parece una camara rota cuando en realidad
     # esta funcionando. Ver EXPOSICION_CAMARA en PARAMETROS.
@@ -2264,9 +2313,9 @@ def camaras_disponibles(hasta=6):
                 break
             cap.release()
         if cap is not None and cap.isOpened():
-            ok, f = cap.read()
+            ok, f = leer_cuadro(cap)
             for _ in range(4):            # las primeras suelen venir en negro
-                ok2, f2 = cap.read()
+                ok2, f2 = leer_cuadro(cap)
                 if ok2:
                     ok, f = ok2, f2
             if ok:
@@ -2734,7 +2783,7 @@ def escuchar_camara(cual=CAMARA, simbolos_por_s=None, fps_pedidos=FPS_CAMARA,
     t_ini, sin_imagen = time.time(), 0
     try:
         while True:
-            ok, cuadro = cap.read()
+            ok, cuadro = leer_cuadro(cap)
             if not ok:
                 sin_imagen += 1
                 if sin_imagen > CUADROS_PERDIDOS_MAX:
