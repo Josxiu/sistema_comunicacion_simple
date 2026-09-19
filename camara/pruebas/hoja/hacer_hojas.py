@@ -21,11 +21,10 @@ from PIL import Image, ImageDraw, ImageFont
 ALFABETO = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZ"
 NEGRO, BLANCO = "#", "_"
 
-# Cuanto se mete el relleno negro hacia dentro de la celda, en fracciones del
-# lado. Deja papel a la vista entre dos negras pegadas, como lo imprime el
-# profesor. Medido sobre la imagen del enunciado: la junta clara entre dos
-# negras ocupa un 7% del paso de celda, o sea un 3,5% por lado.
-SEPARACION = 0.035
+# Gris de la rejilla. Medido sobre la imagen del enunciado: la raya vale 94
+# sobre 255 y es la MISMA entre dos negras que entre dos blancas, o sea que
+# esta pintada encima de todo y no es un hueco que deje asomar el papel.
+GRIS_RAYA = 94
 
 # Las fuentes de las hojas NO son las de las plantillas del lector: si fueran
 # las mismas la prueba estaria amañada.
@@ -53,7 +52,19 @@ def cuadricula_al_azar(filas, cols, rng):
 
 
 def dibujar_hoja(grid, fuente, lado=110, margen=90, grosor=3):
-    """La hoja tal cual saldria de la impresora."""
+    """La hoja tal cual saldria de la impresora.
+
+    La rejilla se pinta GRIS y ENCIMA de todo, que es como la imprime el
+    profesor: medido sobre su ejemplo, la raya vale 94 sobre 255 y vale lo
+    mismo entre dos negras que entre dos blancas.
+
+    Antes se intentaba al reves -raya negra, y el relleno metido hacia dentro
+    para que asomara papel- y eso tiene un defecto de fondo: el hueco es una
+    fraccion de la celda y el grosor de la raya es fijo, asi que en cuanto la
+    celda se hace chica la raya se traga el hueco y las negras contiguas
+    vuelven a fundirse. Pintandola encima la raya no puede desaparecer, mida
+    lo que mida la celda.
+    """
     filas, cols = len(grid), len(grid[0])
     W, H = cols * lado + 2 * margen, filas * lado + 2 * margen
     img = Image.new("L", (W, H), 255)
@@ -63,27 +74,23 @@ def dibujar_hoja(grid, fuente, lado=110, margen=90, grosor=3):
     for f in range(filas):
         for c in range(cols):
             x0, y0 = margen + c * lado, margen + f * lado
-            x1, y1 = x0 + lado, y0 + lado
             v = grid[f][c]
             if v == NEGRO:
-                # Metido hacia dentro, y el borde de la celda NO se le pinta
-                # encima: asi entre dos negras pegadas queda papel a la vista,
-                # que es como lo imprime el profesor. Antes el relleno llegaba
-                # al borde y encima se le dibujaba la raya en negro, con lo
-                # cual dos negras contiguas eran una sola mancha.
-                # El hueco va ADEMAS del grosor de la raya, no en vez de
-                # el. Metiendolo solo 'grosor' la raya negra del borde vuelve
-                # a taparlo y dos negras pegadas siguen siendo una mancha: el
-                # banco salia identico al de antes y por un rato parecio que
-                # el cambio no servia para nada.
-                s = grosor + max(1, int(lado * SEPARACION))
-                d.rectangle([x0 + s, y0 + s, x1 - s, y1 - s], fill=25)
+                d.rectangle([x0, y0, x0 + lado, y0 + lado], fill=20)
             elif v != BLANCO:
                 caja = d.textbbox((0, 0), v, font=tipo)
                 d.text((x0 + (lado - (caja[2] - caja[0])) / 2 - caja[0],
                         y0 + (lado - (caja[3] - caja[1])) / 2 - caja[1]),
                        v, font=tipo, fill=20)
-            d.rectangle([x0, y0, x1, y1], outline=0, width=grosor)
+
+    for f in range(filas + 1):
+        y = margen + f * lado
+        d.line([(margen, y), (margen + cols * lado, y)],
+               fill=GRIS_RAYA, width=grosor)
+    for c in range(cols + 1):
+        x = margen + c * lado
+        d.line([(x, margen), (x, margen + filas * lado)],
+               fill=GRIS_RAYA, width=grosor)
     return np.array(img)
 
 

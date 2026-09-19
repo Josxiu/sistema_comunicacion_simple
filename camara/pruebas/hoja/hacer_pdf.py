@@ -29,9 +29,8 @@ MARGEN_MM = 16.0
 FUENTE = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 FUENTE_PIE = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-# Cuanto se mete hacia dentro el relleno negro, en fracciones del lado de la
-# celda. Deja papel a la vista entre dos negras pegadas.
-SEPARACION = 0.035
+# Gris de la rejilla, medido sobre la imagen del enunciado (94 sobre 255).
+GRIS_RAYA = 94
 
 
 def mm(v):
@@ -51,10 +50,21 @@ PAGINAS = [["A", "B"], ["C", "D"], ["E", "F"]]
 
 
 def dibujar(grid, lado_mm, marco=False):
-    """Una matriz sola, del tamaño exacto que tendra en el papel."""
+    """Una matriz sola, del tamaño exacto que tendra en el papel.
+
+    La rejilla va GRIS y pintada ENCIMA, como en el ejemplo del enunciado
+    (medido ahi: la raya vale 94 sobre 255, y la misma entre dos negras que
+    entre dos blancas). Asi la linea no depende de ningun hueco y se ve igual
+    a cualquier tamaño de celda.
+
+    El intento anterior dejaba el hueco como fraccion de la celda mientras el
+    grosor de la raya iba fijo en milimetros, y el resultado fue que de seis
+    matrices solo dos tenian separacion: en las de celda chica la raya se
+    comia el hueco entero.
+    """
     filas, cols = len(grid), len(grid[0])
     lado = mm(lado_mm)
-    raya = max(2, mm(0.45))
+    raya = max(2, mm(0.4))
     orla = mm(4.0) if marco else 0
     W, H = cols * lado + 2 * orla, filas * lado + 2 * orla
     img = Image.new("L", (W, H), 255)
@@ -63,26 +73,25 @@ def dibujar(grid, lado_mm, marco=False):
         d.rectangle([0, 0, W - 1, H - 1], fill=40)
         d.rectangle([orla, orla, W - orla - 1, H - orla - 1], fill=255)
     tipo = ImageFont.truetype(FUENTE, int(lado * 0.62))
+
     for f in range(filas):
         for c in range(cols):
             x0, y0 = orla + c * lado, orla + f * lado
-            x1, y1 = x0 + lado, y0 + lado
             v = grid[f][c]
             if v == NEGRO:
-                # El relleno va METIDO HACIA DENTRO para que quede papel entre
-                # dos negras pegadas, como en el ejemplo del enunciado. Sin ese
-                # respiro las negras contiguas se funden en una sola mancha y
-                # el borde entre ellas no existe ni en el papel: es el caso que
-                # mas cuesta leer. Medido sobre la imagen del enunciado, la
-                # junta clara ocupa un 7% del paso de celda.
-                s = max(1, int(lado * SEPARACION))
-                d.rectangle([x0 + s, y0 + s, x1 - s, y1 - s], fill=0)
+                d.rectangle([x0, y0, x0 + lado, y0 + lado], fill=0)
             elif v != BLANCO:
                 caja = d.textbbox((0, 0), v, font=tipo)
                 d.text((x0 + (lado - (caja[2] - caja[0])) / 2 - caja[0],
                         y0 + (lado - (caja[3] - caja[1])) / 2 - caja[1]),
                        v, font=tipo, fill=0)
-            d.rectangle([x0, y0, x1, y1], outline=0, width=raya)
+
+    for f in range(filas + 1):
+        y = orla + f * lado
+        d.line([(orla, y), (orla + cols * lado, y)], fill=GRIS_RAYA, width=raya)
+    for c in range(cols + 1):
+        x = orla + c * lado
+        d.line([(x, orla), (x, orla + filas * lado)], fill=GRIS_RAYA, width=raya)
     return img
 
 
