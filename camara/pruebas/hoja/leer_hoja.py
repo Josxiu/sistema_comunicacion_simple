@@ -1,9 +1,22 @@
 # -*- coding: utf-8 -*-
 """Lee la cuadricula de la hoja impresa: de una foto o de la camara.
 
-    python leer_hoja.py foto.jpg              una foto
-    python leer_hoja.py --camara 0            la webcam
+    python leer_hoja.py                       pregunta que foto abrir
+    python leer_hoja.py foto.jpg              esa foto
+    python leer_hoja.py --camara 0            la webcam, VIENDO lo que mira
     python leer_hoja.py --camara http://IP:8080/video     el celular
+    python leer_hoja.py --tamaño 9x8 foto.jpg   diciendole cuantas celdas son
+
+Sin argumentos abre el dialogo de archivos, asi no hay que escribir rutas.
+
+Con --camara se abre una ventana con lo que ve la camara, la rejilla que ha
+encontrado dibujada encima y las letras que va leyendo: ESPACIO junta esa
+lectura con las anteriores y Q sale. Sin ver la imagen no hay forma de apuntar.
+
+Lo de --tamaño no es un capricho: contar cuantas celdas hay es la parte que
+peor se porta, y el dia de la prueba el tamaño se sabe con mirar la hoja.
+Dandolo se salta el conteo y solo queda leer las celdas, que es lo que si va
+bien. Eso si, no arregla una foto en la que el marco salga torcido.
 
 Sale la matriz lista para pegar en el transmisor. Solo necesita numpy y
 opencv, igual que rx_camara.py; las plantillas de las letras vienen ya
@@ -281,7 +294,7 @@ def cuantas_celdas(centros, largo, tam_celda, maximo=31):
     return mejor_n if mejor is not None and mejor < 0.25 else None
 
 
-def celdas_de_la_tabla(derecha):
+def celdas_de_la_tabla(derecha, tamaño=None):
     """Las celdas son los HUECOS que dejan las rayas. Devuelve (cajas, f, c).
 
     Este es el unico camino que aguanto las hojas anchas. Los tres anteriores
@@ -334,8 +347,14 @@ def celdas_de_la_tabla(derecha):
     # siempre es MAS grande que una suelta, nunca mas chica.
     ancho = float(np.percentile([c[2] for c in cajas], 25))
     alto = float(np.percentile([c[3] for c in cajas], 25))
-    cols = cuantas_celdas([c[4] for c in cajas], W, ancho)
-    filas = cuantas_celdas([c[5] for c in cajas], H, alto)
+    if tamaño:
+        # Contar cuantas celdas hay es la parte que peor se porta, y el dia de
+        # la prueba el tamaño se sabe: se mira la hoja. Dandolo, se salta el
+        # conteo entero y solo queda leer las celdas, que es lo que si va bien.
+        filas, cols = tamaño
+    else:
+        cols = cuantas_celdas([c[4] for c in cajas], W, ancho)
+        filas = cuantas_celdas([c[5] for c in cajas], H, alto)
     if not cols or not filas:
         return None, 0, 0
 
@@ -464,7 +483,8 @@ def leer_celda(binaria, x0, x1, y0, y1, plantillas):
 
 # ------------------------------------------------- 5. todo junto ----------
 
-def leer_hoja(ruta, plantillas=None, devolver_debug=False):
+def leer_hoja(ruta, plantillas=None, devolver_debug=False,
+              tamaño=None):
     """De la foto a la matriz. Devuelve (grid, nota, confianzas)."""
     # acepta una ruta o un cuadro ya cargado (la camara entrega cuadros)
     img = (ruta if isinstance(ruta, np.ndarray)
@@ -496,7 +516,7 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False):
         return None, "no se ve el marco de la tabla", None
 
     derecha = afinar(enderezar(img, esquinas))
-    cajas, filas, cols = celdas_de_la_tabla(derecha)
+    cajas, filas, cols = celdas_de_la_tabla(derecha, tamaño)
     if not cajas:
         return None, "se ve el marco pero no las celdas de adentro", None
 
@@ -517,7 +537,9 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False):
         grid.append(fila); confianzas.append(conf)
     nota = "%d x %d" % (len(grid), len(grid[0]))
     if devolver_debug:
-        return grid, nota, (confianzas, derecha, xs, ys)
+        # 'cajas' y la escala hacen falta para pintar la rejilla encima del
+        # cuadro de la camara: van en coordenadas de la hoja ya enderezada.
+        return grid, nota, (confianzas, derecha, cajas)
     return grid, nota, confianzas
 
 
@@ -579,11 +601,19 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
 
 
 # Por debajo de este margen entre la mejor plantilla y la segunda, la letra se
-# marca para que la revises. Esta medido, no puesto a ojo: sobre los cuatro
-# bancos (800 letras acertadas, 7 falladas) este umbral marca las 7 falladas y
-# solo estorba en el 4,8% de las buenas. Con 0,08 no gana nada y estorba en el
-# 25%. Ojo que 7 errores es muestra corta para presumir de cazarlos todos.
-DUDA = 0.05
+# marca con ? para que la revises. El numero esta medido sobre las DIEZ FOTOS
+# REALES de la hoja impresa (183 letras acertadas, 16 falladas):
+#
+#   0,05 -> marca el 31% de los errores y estorba en el  8,7% de los aciertos
+#   0,08 -> marca el 62% de los errores y estorba en el 21,9% de los aciertos
+#   0,12 -> marca el 81% de los errores y estorba en el 43,7% de los aciertos
+#
+# Antes estaba en 0,05 porque sobre el banco sintetico ese umbral cazaba TODOS
+# los errores estorbando en el 4,8%. En papel no se parece: las dos
+# distribuciones se solapan mucho mas (los errores tienen margen mediano 0,073
+# y los aciertos 0,143), asi que no hay ningun umbral que cace todo sin
+# marcar media hoja. 0,08 es el compromiso; subirlo caza mas y marca mas.
+DUDA = 0.08
 
 
 def pintar(grid, confianzas=None, duda=DUDA):
@@ -596,24 +626,173 @@ def pintar(grid, confianzas=None, duda=DUDA):
         print("   " + " ".join(marcas))
 
 
+def escoger_archivo():
+    """Abre el dialogo de siempre para buscar la foto, sin escribir rutas."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        print("No hay tkinter: pasa la ruta de la foto como argumento.")
+        return None
+    raiz = tk.Tk()
+    raiz.withdraw()
+    ruta = filedialog.askopenfilename(
+        title="Escoge la foto de la hoja",
+        filetypes=[("Fotos", "*.jpg *.JPG *.jpeg *.JPEG *.png *.PNG "
+                             "*.bmp *.BMP *.heic *.HEIC"),
+                   ("Todos", "*.*")])
+    raiz.destroy()
+    return ruta or None
+
+
+def _dibujar_lectura(vista, cajas, grid, conf, escala, duda=None):
+    """Pinta la rejilla encontrada y lo leido encima del cuadro de la camara."""
+    duda = DUDA if duda is None else duda
+    for (f, c), (x0, y0, x1, y1) in cajas.items():
+        p0 = (int(x0 * escala), int(y0 * escala))
+        p1 = (int(x1 * escala), int(y1 * escala))
+        v = grid[f][c] if f < len(grid) and c < len(grid[0]) else "?"
+        seguro = (conf[f][c] >= duda) if conf else True
+        color = ((90, 200, 90) if seguro else (60, 180, 255))
+        cv2.rectangle(vista, p0, p1, color, 1)
+        if v not in (NEGRO, BLANCO):
+            cv2.putText(vista, v, (p0[0] + 4, p1[1] - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+    return vista
+
+
+def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
+    """Como leer_de_la_camara, pero ENSEÑANDO lo que ve la camara.
+
+    Sin ver la imagen no se puede apuntar: el programa encuentra algo y quien
+    sostiene el telefono no sabe a que. Aqui se ve el cuadro, la rejilla que
+    ha encontrado dibujada encima y las letras que va leyendo, asi que se
+    corrige la punteria mirando.
+    """
+    if not hay_pantalla():
+        print("(sin pantalla: se lee a ciegas)")
+        return leer_de_la_camara(fuente, cuadros)
+
+    cap = cv2.VideoCapture(int(fuente) if str(fuente).isdigit() else fuente)
+    if not cap.isOpened():
+        return None, "no se pudo abrir la camara", None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    plantillas = Plantillas()
+    ventana = "Hoja - ESPACIO lee, Q sale"
+    cv2.namedWindow(ventana, cv2.WINDOW_NORMAL)
+
+    votos, leidas, ultimo = {}, 0, None
+    forma_ultima = None
+    try:
+        while True:
+            ok, f = cap.read()
+            if not ok:
+                break
+            gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
+            vista = f.copy() if f.ndim == 3 else cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+
+            grid, nota, extra = leer_hoja(gris, plantillas, devolver_debug=True,
+                                          tamaño=tamaño)
+            if grid is not None:
+                conf, derecha, cajas = extra[0], extra[1], extra[2]
+                forma_ultima = (len(grid), len(grid[0]))
+                ultimo = (grid, conf)
+                aviso = "%s  -  ESPACIO para leerla" % nota
+                color = (90, 200, 90)
+            else:
+                aviso = str(nota)
+                color = (60, 60, 230)
+
+            cv2.putText(vista, aviso, (14, 32), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(vista, aviso, (14, 32), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, color, 1, cv2.LINE_AA)
+            if leidas:
+                pie = "%d lecturas juntadas" % leidas
+                cv2.putText(vista, pie, (14, vista.shape[0] - 16),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4,
+                            cv2.LINE_AA)
+                cv2.putText(vista, pie, (14, vista.shape[0] - 16),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
+                            cv2.LINE_AA)
+            cv2.imshow(ventana, vista)
+
+            tecla = cv2.waitKey(1) & 0xFF
+            if tecla in (ord("q"), ord("Q"), 27):
+                break
+            if tecla == 32 and ultimo is not None:
+                # juntar esta lectura con las anteriores de la misma forma
+                grid, _ = ultimo
+                leidas += 1
+                for i, fila in enumerate(grid):
+                    for j, v in enumerate(fila):
+                        caja = votos.setdefault((forma_ultima, i, j), {})
+                        caja[v] = caja.get(v, 0) + 1
+                if leidas >= cuadros:
+                    break
+    finally:
+        cap.release()
+        cv2.destroyWindow(ventana)
+
+    if not votos:
+        return None, "no se leyo ninguna cuadricula", None
+    forma = max(set(k[0] for k in votos),
+                key=lambda fm: sum(sum(votos[k].values())
+                                   for k in votos if k[0] == fm))
+    filas, cols = forma
+    grid, seguridad = [], []
+    for i in range(filas):
+        fila, seg = [], []
+        for j in range(cols):
+            caja = votos.get((forma, i, j), {})
+            if not caja:
+                fila.append(BLANCO); seg.append(0.0); continue
+            v = max(caja, key=caja.get)
+            fila.append(v); seg.append(caja[v] / float(sum(caja.values())))
+        grid.append(fila); seguridad.append(seg)
+    return grid, "%d x %d  (%d lecturas)" % (filas, cols, leidas), seguridad
+
+
 def main():
-    args = sys.argv[1:]
-    if not args:
-        print(__doc__)
-        return
-    if args[0] == "--camara":
+    args = [a for a in sys.argv[1:]]
+    tamaño = None
+    for i, a in enumerate(list(args)):
+        if a in ("--tamaño", "--tamano", "-t") and i + 1 < len(args):
+            try:
+                f, c = args[i + 1].lower().replace("x", " ").split()
+                tamaño = (int(f), int(c))
+            except ValueError:
+                print("El tamaño se escribe asi:  --tamaño 9x8")
+                return
+            args = [x for j, x in enumerate(args) if j not in (i, i + 1)]
+            break
+
+    if args and args[0] == "--camara":
         fuente = args[1] if len(args) > 1 else "0"
-        print("Mirando la hoja por la camara (%s)..." % fuente)
-        grid, nota, seg = leer_de_la_camara(fuente)
+        print("Mirando la hoja por la camara (%s). ESPACIO lee, Q sale."
+              % fuente)
+        grid, nota, seg = mirar_con_la_camara(fuente, tamaño)
         print("\n%s" % nota)
         if grid:
             pintar(grid, seg)
         return
+
+    if not args:
+        # Sin argumentos se pregunta, que es mas comodo que escribir la ruta.
+        ruta = escoger_archivo()
+        if not ruta:
+            print(__doc__)
+            return
+        args = [ruta]
+
     for ruta in args:
-        grid, nota, conf = leer_hoja(ruta)
+        grid, nota, conf = leer_hoja(ruta, tamaño=tamaño)
         print("\n%s  ->  %s" % (Path(ruta).name, nota))
         if grid:
             pintar(grid, conf)
+        else:
+            print("   %s" % nota)
 
 
 if __name__ == "__main__":
