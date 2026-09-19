@@ -29,6 +29,10 @@ MARGEN_MM = 16.0
 FUENTE = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 FUENTE_PIE = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
+# Cuanto se mete hacia dentro el relleno negro, en fracciones del lado de la
+# celda. Deja papel a la vista entre dos negras pegadas.
+SEPARACION = 0.035
+
 
 def mm(v):
     return int(round(v * PPP / 25.4))
@@ -65,7 +69,14 @@ def dibujar(grid, lado_mm, marco=False):
             x1, y1 = x0 + lado, y0 + lado
             v = grid[f][c]
             if v == NEGRO:
-                d.rectangle([x0, y0, x1, y1], fill=0)
+                # El relleno va METIDO HACIA DENTRO para que quede papel entre
+                # dos negras pegadas, como en el ejemplo del enunciado. Sin ese
+                # respiro las negras contiguas se funden en una sola mancha y
+                # el borde entre ellas no existe ni en el papel: es el caso que
+                # mas cuesta leer. Medido sobre la imagen del enunciado, la
+                # junta clara ocupa un 7% del paso de celda.
+                s = max(1, int(lado * SEPARACION))
+                d.rectangle([x0 + s, y0 + s, x1 - s, y1 - s], fill=0)
             elif v != BLANCO:
                 caja = d.textbbox((0, 0), v, font=tipo)
                 d.text((x0 + (lado - (caja[2] - caja[0])) / 2 - caja[0],

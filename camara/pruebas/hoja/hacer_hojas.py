@@ -21,6 +21,12 @@ from PIL import Image, ImageDraw, ImageFont
 ALFABETO = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZ"
 NEGRO, BLANCO = "#", "_"
 
+# Cuanto se mete el relleno negro hacia dentro de la celda, en fracciones del
+# lado. Deja papel a la vista entre dos negras pegadas, como lo imprime el
+# profesor. Medido sobre la imagen del enunciado: la junta clara entre dos
+# negras ocupa un 7% del paso de celda, o sea un 3,5% por lado.
+SEPARACION = 0.035
+
 # Las fuentes de las hojas NO son las de las plantillas del lector: si fueran
 # las mismas la prueba estaria amañada.
 FUENTES_HOJA = [
@@ -60,8 +66,18 @@ def dibujar_hoja(grid, fuente, lado=110, margen=90, grosor=3):
             x1, y1 = x0 + lado, y0 + lado
             v = grid[f][c]
             if v == NEGRO:
-                d.rectangle([x0 + grosor, y0 + grosor,
-                             x1 - grosor, y1 - grosor], fill=30)
+                # Metido hacia dentro, y el borde de la celda NO se le pinta
+                # encima: asi entre dos negras pegadas queda papel a la vista,
+                # que es como lo imprime el profesor. Antes el relleno llegaba
+                # al borde y encima se le dibujaba la raya en negro, con lo
+                # cual dos negras contiguas eran una sola mancha.
+                # El hueco va ADEMAS del grosor de la raya, no en vez de
+                # el. Metiendolo solo 'grosor' la raya negra del borde vuelve
+                # a taparlo y dos negras pegadas siguen siendo una mancha: el
+                # banco salia identico al de antes y por un rato parecio que
+                # el cambio no servia para nada.
+                s = grosor + max(1, int(lado * SEPARACION))
+                d.rectangle([x0 + s, y0 + s, x1 - s, y1 - s], fill=25)
             elif v != BLANCO:
                 caja = d.textbbox((0, 0), v, font=tipo)
                 d.text((x0 + (lado - (caja[2] - caja[0])) / 2 - caja[0],
