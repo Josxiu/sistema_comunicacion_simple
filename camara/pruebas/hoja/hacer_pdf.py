@@ -21,7 +21,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hacer_hojas import crucigrama, NEGRO, BLANCO                # noqa: E402
+from hacer_hojas import (crucigrama, abecedario,                  # noqa: E402
+                         NEGRO, BLANCO)
 
 PPP = 300                                   # puntos por pulgada al imprimir
 HOJA_MM = (216.0, 279.0)                    # carta; en A4 tambien cabe
@@ -37,16 +38,26 @@ def mm(v):
     return int(round(v * PPP / 25.4))
 
 
-# (etiqueta, filas, columnas, mm de celda, marco decorativo)
+# (etiqueta, filas, columnas, mm de celda, marco decorativo, como se llena)
+# "cruz" es el tablero del enunciado, mitad negro; "letras" trae mas letras y
+# mas blancos, y ademas las que la lista de palabras no alcanza a meter.
 MATRICES = [
-    ("A", 7, 7, 18.0, False),
-    ("B", 7, 7, 12.0, False),
-    ("C", 9, 8, 15.0, False),
-    ("D", 6, 6, 8.0, False),
-    ("E", 4, 20, 9.0, False),
-    ("F", 8, 10, 12.0, True),
+    ("A", 7, 7, 18.0, False, "cruz"),
+    ("B", 7, 7, 12.0, False, "cruz"),
+    ("C", 9, 8, 15.0, False, "cruz"),
+    ("D", 6, 6, 8.0, False, "cruz"),
+    ("E", 4, 20, 9.0, False, "cruz"),
+    ("F", 8, 10, 12.0, True, "cruz"),
+    ("G", 6, 8, 14.0, False, "letras"),
+    ("H", 7, 9, 13.0, False, "letras"),
 ]
-PAGINAS = [["A", "B"], ["C", "D"], ["E", "F"]]
+PAGINAS = [["A", "B"], ["C", "D"], ["E", "F"], ["G", "H"]]
+
+# Las cuatro que la lista de palabras deja fuera -en español G, K, W y X casi
+# solo salen en nombres y extranjerismos-, las dos que aparecian una sola vez
+# en las seis primeras matrices juntas, y la Q, que es la unica letra que el
+# lector falla hoy (la confunde con la O) y conviene tener bien representada.
+FALTANTES = "GKWXÑYQ"
 
 
 def dibujar(grid, lado_mm, marco=False):
@@ -102,8 +113,9 @@ def pagina_vacia():
 def main():
     rng = random.Random(2026)
     hechas = {}
-    for etq, filas, cols, lado_mm, marco in MATRICES:
-        grid = crucigrama(filas, cols, rng)
+    for etq, filas, cols, lado_mm, marco, relleno in MATRICES:
+        grid = (abecedario(filas, cols, rng, FALTANTES) if relleno == "letras"
+                else crucigrama(filas, cols, rng))
         hechas[etq] = (grid, dibujar(grid, lado_mm, marco), filas, cols, lado_mm)
 
     paginas = []
@@ -136,7 +148,7 @@ def main():
     d.text((mm(MARGEN_MM), y), "Respuestas  (# negro, _ blanco)",
            font=titulo, fill=0)
     y += mm(10)
-    for etq, _, _, _, _ in MATRICES:
+    for etq, _, _, _, _, _ in MATRICES:
         grid = hechas[etq][0]
         d.text((mm(MARGEN_MM), y), "%s  %d x %d" % (etq, len(grid), len(grid[0])),
                font=titulo, fill=0)
@@ -152,7 +164,7 @@ def main():
         salida, save_all=True, resolution=PPP,
         append_images=[p.convert("RGB") for p in paginas[1:]])
     print("%s  (%d paginas)" % (salida.name, len(paginas)))
-    for etq, filas, cols, lado_mm, marco in MATRICES:
+    for etq, filas, cols, lado_mm, marco, _ in MATRICES:
         g = hechas[etq][0]
         negras = sum(v == NEGRO for f in g for v in f)
         print("  %s  %2dx%-2d  celda %4.0f mm  ->  %3.0f x %3.0f mm   %2d%% negras%s"

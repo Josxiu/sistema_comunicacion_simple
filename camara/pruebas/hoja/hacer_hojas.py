@@ -182,6 +182,31 @@ def crucigrama(filas, cols, rng):
     return g
 
 
+def abecedario(filas, cols, rng, obligatorias=""):
+    """Mas letras y mas blancos que negros, y con letras que no salen solas.
+
+    El crucigrama sale de una lista de palabras, y esa lista deja fuera cuatro
+    letras del alfabeto: G, K, W y X, que en español casi solo aparecen en
+    nombres y extranjerismos. La Ñ y la Y salian una sola vez en las seis
+    matrices juntas. Aqui se colocan a la fuerza, porque una letra que nunca se
+    prueba es una letra que no se sabe si se lee.
+    """
+    huecos = [(f, c) for f in range(filas) for c in range(cols)]
+    rng.shuffle(huecos)
+    g = [[NEGRO] * cols for _ in range(filas)]
+    puestas = 0
+    for letra in obligatorias:
+        for _ in range(2):                      # cada una un par de veces
+            if puestas < len(huecos):
+                f, c = huecos[puestas]; puestas += 1
+                g[f][c] = letra
+    for f, c in huecos[puestas:]:
+        r = rng.random()
+        g[f][c] = (NEGRO if r < 0.32 else
+                   BLANCO if r < 0.60 else rng.choice(ALFABETO))
+    return g
+
+
 # (carpeta, como se llena, casos)
 # El caso es (filas, cols, perspectiva, giro, desenfoque, ruido, sombra, escala)
 NORMAL = [(2, 3), (4, 4), (5, 8), (9, 8), (10, 8), (3, 3), (6, 6), (8, 11)]
