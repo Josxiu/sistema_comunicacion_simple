@@ -118,18 +118,44 @@ def crucigrama(filas, cols, rng):
     existe en el papel, que es el caso que de verdad cuesta.
     """
     g = [[NEGRO] * cols for _ in range(filas)]
-    for _ in range(max(3, (filas * cols) // 8)):
+    for _ in range(max(4, (filas * cols) // 7)):
         p = rng.choice(PALABRAS)
-        if rng.random() < 0.5 and cols >= len(p):
+        # En un tablero de pocas filas casi ninguna palabra cabe parada, asi
+        # que sortear la orientacion a ciegas lo dejaba casi todo negro: una de
+        # 4x20 salia con 62% de negro y CINCO columnas negras enteras, que no
+        # se parece a lo que entrega el profesor (su ejemplo va por el 49%).
+        cabe_h, cabe_v = cols >= len(p), filas >= len(p)
+        if not (cabe_h or cabe_v):
+            continue
+        horizontal = cabe_h and (not cabe_v or rng.random() < 0.5)
+        if horizontal:
             f, c = rng.randrange(filas), rng.randrange(cols - len(p) + 1)
             for k, ch in enumerate(p):
                 g[f][c + k] = ch
-        elif filas >= len(p):
+        else:
             f, c = rng.randrange(filas - len(p) + 1), rng.randrange(cols)
             for k, ch in enumerate(p):
                 g[f + k][c] = ch
-    for _ in range((filas * cols) // 10):
-        g[rng.randrange(filas)][rng.randrange(cols)] = BLANCO
+
+    # Se abre hasta dejar mas o menos la mitad en negro, y sin filas ni
+    # columnas negras de punta a punta: ahi no queda ni una raya visible.
+    def negras():
+        return [(i, j) for i in range(filas) for j in range(cols)
+                if g[i][j] == NEGRO]
+
+    tope = int(filas * cols * 0.52)
+    sueltas = negras()
+    rng.shuffle(sueltas)
+    for i, j in sueltas:
+        if len(negras()) <= tope:
+            break
+        g[i][j] = BLANCO
+    for i in range(filas):
+        if all(v == NEGRO for v in g[i]):
+            g[i][rng.randrange(cols)] = BLANCO
+    for j in range(cols):
+        if all(g[i][j] == NEGRO for i in range(filas)):
+            g[rng.randrange(filas)][j] = BLANCO
     return g
 
 
