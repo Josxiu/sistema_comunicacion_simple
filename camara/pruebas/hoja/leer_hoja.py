@@ -50,6 +50,8 @@ Cada celda sale con una confianza, para poder resaltar las dudosas en vez de
 creerle a ciegas.
 """
 import sys
+import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -57,6 +59,21 @@ import numpy as np
 
 ALFABETO = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZ"
 NEGRO, BLANCO = "#", "_"
+
+_HAY_PANTALLA = None
+
+
+def hay_pantalla():
+    """Comprueba si OpenCV puede abrir ventanas en esta sesión."""
+    global _HAY_PANTALLA
+    if _HAY_PANTALLA is None:
+        try:
+            cv2.namedWindow("_prueba_", cv2.WINDOW_NORMAL)
+            cv2.destroyWindow("_prueba_")
+            _HAY_PANTALLA = True
+        except Exception:
+            _HAY_PANTALLA = False
+    return _HAY_PANTALLA
 
 LADO_PLANTILLA = 32       # la letra normalizada, en pixeles
 LADO_CELDA = 64           # a cuanto se lleva cada celda al enderezar
@@ -366,7 +383,19 @@ def celdas_de_la_tabla(derecha, tamaño=None):
         for c in range(cols):
             rejilla_cajas[(f, c)] = (W * c / cols, H * f / filas,
                                      W * (c + 1) / cols, H * (f + 1) / filas)
+    # ...pero SOLO si el hueco medido es UNA celda. Arriba ya se dijo que los
+    # huecos fusionados existen -dos celdas blancas cuya raya de en medio salio
+    # floja dan un solo hueco del ancho de dos-, y contarlos se arreglo con el
+    # percentil; usarlos como caja, no. Una caja doble le mete DOS letras al
+    # comparador, que entonces no compara una letra contra sus plantillas sino
+    # un borron contra todas: la fila NOCHE se leia NOCOE y MENSAJE se leia
+    # MONSAJE, las dos veces cayendo en la O, que es la plantilla que mas se
+    # parece a cualquier mancha redondeada. Si el hueco abarca mas de una
+    # celda se deja la reticula, que ahi si separa las dos.
+    paso_x, paso_y = W / float(cols), H / float(filas)
     for x, y, w, h, mx, my in cajas:
+        if w > 1.5 * paso_x or h > 1.5 * paso_y:
+            continue
         f = min(filas - 1, max(0, int(my * filas / H)))
         c = min(cols - 1, max(0, int(mx * cols / W)))
         rejilla_cajas[(f, c)] = (x, y, x + w, y + h)
@@ -425,6 +454,34 @@ class Plantillas:
         return self.alfabeto[cual], mejor, mejor - segunda
 
 
+def desenfoque_grande(gris, k):
+    """Un GaussianBlur de nucleo enorme, pero hecho en pequeno.
+
+    Con celdas de 120 px el nucleo sale de 485x485, y ese desenfoque costaba
+    485 ms: el 62% de lo que tardaba leer una hoja entera, y en vivo dejaba la
+    camara en 1.4 cuadros por segundo.
+
+    Se puede hacer a un cuarto de tamano sin perder nada, y no es una
+    aproximacion de las que se pagan luego: lo que se desenfoca aqui ya viene
+    de una dilatacion de 485 px, o sea que por construccion no tiene un solo
+    detalle mas pequeno que eso. Reducir a 1/4 no tiene que tirar informacion
+    que no exista. Medido contra el desenfoque entero sobre la hoja de ejemplo:
+    9 ms en vez de 485, diferencia media de 0.00 niveles de gris.
+
+    Con nucleos pequenos el rodeo no compensa y ademas si empezaria a notarse,
+    asi que por debajo de 60 px se hace el desenfoque de siempre.
+    """
+    if k < 60:
+        return cv2.GaussianBlur(gris, (k | 1, k | 1), 0)
+    escala = 0.25
+    ch = cv2.resize(gris, None, fx=escala, fy=escala,
+                    interpolation=cv2.INTER_AREA)
+    kc = max(3, int(k * escala)) | 1
+    ch = cv2.GaussianBlur(ch, (kc, kc), 0)
+    return cv2.resize(ch, (gris.shape[1], gris.shape[0]),
+                      interpolation=cv2.INTER_LINEAR)
+
+
 def tinta_de_la_hoja(derecha, lado_celda):
     """Binariza la hoja ENTERA de una vez. Tinta = blanco.
 
@@ -450,7 +507,7 @@ def tinta_de_la_hoja(derecha, lado_celda):
     # bastante despacio como para que siga siguiendola.
     k = int(max(9, lado_celda * 4)) | 1
     papel = cv2.dilate(derecha, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
-    papel = cv2.GaussianBlur(papel, (k, k), 0)
+    papel = desenfoque_grande(papel, k)
     plano = np.clip(derecha.astype(np.float32) * 220.0
                     / np.maximum(papel.astype(np.float32), 1), 0, 255)
     _, b = cv2.threshold(plano.astype(np.uint8), 0, 255,
@@ -543,6 +600,97 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
     return grid, nota, confianzas
 
 
+def leer_cuadro(cap):
+    """Lee un cuadro y dice si la camara lo entrego BIEN.
+
+    cap.read() no solo devuelve False cuando no hay imagen: tambien puede
+    reventar con un cv2.error si el tamano que la camara DICE tener no es el
+    del buffer que entrega. Pasa con DroidCam cuando se gira el telefono y
+    cambia de formato en caliente. Es un cuadro que hay que tirar, no un
+    motivo para morirse: el mismo criterio que en rx_camara.py.
+    """
+    try:
+        ok, cuadro = cap.read()
+    except cv2.error:
+        return False, None
+    return bool(ok), cuadro
+
+
+def abrir_camara(fuente, ancho=1920, alto=1080):
+    """Abre la camara pidiendole el tamano ANTES del primer cuadro.
+
+    El orden importa: pedir el tamano con el stream ya andando no es pedirlo.
+    El driver puede aceptar el cambio, seguir entregando el buffer viejo y
+    hacer que el siguiente read() aborte con "_step >= minstep". Pedido antes,
+    o lo da o no lo da, pero no miente. Si no lo da, se reabre sin forzar nada.
+    """
+    cual = int(fuente) if str(fuente).isdigit() else fuente
+    cap = cv2.VideoCapture(cual)
+    if not cap.isOpened():
+        return cap
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, ancho)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, alto)
+    if leer_cuadro(cap)[0]:
+        return cap
+    cap.release()
+    return cv2.VideoCapture(cual)
+
+
+class LectorDeFondo:
+    """Lee la hoja en OTRO HILO para que la camara no se pare.
+
+    leer_hoja tarda del orden de 300 ms por cuadro, casi todo en el Hough de
+    quitar_giro. Llamandola dentro del bucle de dibujo la ventana se refresca
+    tres veces por segundo, y con tres cuadros por segundo no se puede apuntar:
+    se mueve la mano y la imagen va un tercio de segundo por detras. Por eso
+    "el de los rx va mas rapido" -rx_camara.py hace justo esto, lo caro en
+    hilos aparte y el bucle de captura solo capturando.
+
+    El hilo trabaja siempre sobre el ULTIMO cuadro ofrecido, no sobre una cola:
+    los cuadros atrasados no le importan a nadie, lo que importa es lo que la
+    camara esta viendo ahora. Los que llegan mientras esta ocupado se tiran, y
+    eso es lo correcto, no una perdida.
+    """
+
+    def __init__(self, plantillas, tamaño=None):
+        self.plantillas, self.tamaño = plantillas, tamaño
+        self._pendiente = None
+        self._salida = None
+        self._parar = False
+        self._cerrojo = threading.Lock()
+        self._hilo = threading.Thread(target=self._trabajar, daemon=True)
+        self._hilo.start()
+
+    def ofrecer(self, gris):
+        """Deja un cuadro para analizar, pisando el que hubiera sin analizar."""
+        with self._cerrojo:
+            self._pendiente = gris
+
+    def ultimo(self):
+        """La ultima lectura terminada: (grid, nota, extra), o None."""
+        with self._cerrojo:
+            return self._salida
+
+    def parar(self):
+        self._parar = True
+        self._hilo.join(timeout=2.0)
+
+    def _trabajar(self):
+        while not self._parar:
+            with self._cerrojo:
+                gris, self._pendiente = self._pendiente, None
+            if gris is None:
+                time.sleep(0.005)
+                continue
+            try:
+                salida = leer_hoja(gris, self.plantillas, devolver_debug=True,
+                                   tamaño=self.tamaño)
+            except Exception as e:                  # un cuadro malo no mata
+                salida = (None, "no se pudo leer: %s" % e, None)
+            with self._cerrojo:
+                self._salida = salida
+
+
 def leer_de_la_camara(fuente, cuadros=25, avisar=print):
     """Lee la hoja de la camara y se queda con lo que MAS SE REPITE.
 
@@ -551,26 +699,29 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
     sea que cambian de un cuadro a otro, mientras que el acierto se repite.
     Votar entre varias lecturas se lleva por delante casi todos.
     """
-    cap = cv2.VideoCapture(int(fuente) if str(fuente).isdigit() else fuente)
+    cap = abrir_camara(fuente)
     if not cap.isOpened():
         return None, "no se pudo abrir la camara", None
     plantillas = Plantillas()
-    votos, leidas = {}, 0
+    votos, margenes, leidas = {}, {}, 0
     try:
         for _ in range(cuadros * 4):          # de sobra, por los cuadros malos
-            ok, f = cap.read()
+            ok, f = leer_cuadro(cap)
             if not ok:
                 break
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
-            grid, nota, _ = leer_hoja(gris, plantillas)
+            grid, nota, conf = leer_hoja(gris, plantillas)
             if grid is None:
                 continue
             leidas += 1
             forma = (len(grid), len(grid[0]))
             for i, fila in enumerate(grid):
                 for j, v in enumerate(fila):
-                    caja = votos.setdefault((forma, i, j), {})
+                    clave = (forma, i, j)
+                    caja = votos.setdefault(clave, {})
                     caja[v] = caja.get(v, 0) + 1
+                    margenes.setdefault(clave, {}).setdefault(v, []).append(
+                        conf[i][j] if conf else 1.0)
             if avisar and leidas % 5 == 0:
                 avisar("   %d lecturas buenas (%s)" % (leidas, nota))
             if leidas >= cuadros:
@@ -595,7 +746,13 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
                 fila.append(BLANCO); seg.append(0.0); continue
             v = max(caja, key=caja.get)
             fila.append(v)
-            seg.append(caja[v] / float(sum(caja.values())))
+            # Igual que en mirar_con_la_camara: el acuerdo entre lecturas y el
+            # margen contra las plantillas son dudas distintas y hacen falta
+            # las dos. Ver el comentario largo de alla.
+            acuerdo = caja[v] / float(sum(caja.values()))
+            suyos = margenes.get((forma, i, j), {}).get(v, [])
+            seg.append(0.0 if acuerdo < ACUERDO_MIN
+                       else (float(np.median(suyos)) if suyos else 1.0))
         grid.append(fila); seguridad.append(seg)
     return grid, "%d x %d  (%d lecturas)" % (filas, cols, leidas), seguridad
 
@@ -614,6 +771,10 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
 # y los aciertos 0,143), asi que no hay ningun umbral que cace todo sin
 # marcar media hoja. 0,08 es el compromiso; subirlo caza mas y marca mas.
 DUDA = 0.08
+
+# Cuando se vota entre varias lecturas, por debajo de este acuerdo la celda se
+# marca como dudosa aunque cada lectura suelta pareciera segura.
+ACUERDO_MIN = 0.6
 
 
 def pintar(grid, confianzas=None, duda=DUDA):
@@ -645,20 +806,57 @@ def escoger_archivo():
     return ruta or None
 
 
-def _dibujar_lectura(vista, cajas, grid, conf, escala, duda=None):
-    """Pinta la rejilla encontrada y lo leido encima del cuadro de la camara."""
-    duda = DUDA if duda is None else duda
+def panel_de_lectura(derecha, cajas, grid, conf, duda=DUDA):
+    """La hoja ENDEREZADA con la rejilla y las letras leidas encima.
+
+    Esto es lo que de verdad hay que poder mirar: no el cuadro de la camara,
+    sino lo que el programa cree que esta viendo. Si la hoja sale torcida, si
+    la rejilla no cae sobre las celdas o si una letra esta mal, aqui se ve de
+    un vistazo y no hay que leer la consola al final para enterarse.
+
+    Se dibuja sobre la hoja enderezada y no sobre el cuadro de la camara por
+    una razon concreta: las cajas de las celdas estan en coordenadas de la hoja
+    enderezada, que es otro sistema. Llevarlas de vuelta al cuadro habria que
+    deshacer la homografia Y el giro de quitar_giro, y aun asi quedarian mal
+    encajadas porque el analisis va un poco por detras de la imagen. Sobre la
+    hoja enderezada siempre cuadran, porque salieron de ahi.
+
+    Verde = la celda se leyo con holgura. Naranja = la mejor plantilla y la
+    segunda quedaron demasiado cerca (o los votos no se pusieron de acuerdo);
+    son las que hay que mirar a ojo.
+    """
+    vista = cv2.cvtColor(derecha, cv2.COLOR_GRAY2BGR)
     for (f, c), (x0, y0, x1, y1) in cajas.items():
-        p0 = (int(x0 * escala), int(y0 * escala))
-        p1 = (int(x1 * escala), int(y1 * escala))
-        v = grid[f][c] if f < len(grid) and c < len(grid[0]) else "?"
+        if f >= len(grid) or c >= len(grid[0]):
+            continue
+        v = grid[f][c]
         seguro = (conf[f][c] >= duda) if conf else True
-        color = ((90, 200, 90) if seguro else (60, 180, 255))
-        cv2.rectangle(vista, p0, p1, color, 1)
+        color = (90, 200, 90) if seguro else (60, 180, 255)
+        p0, p1 = (int(x0), int(y0)), (int(x1), int(y1))
+        cv2.rectangle(vista, p0, p1, color, 2)
         if v not in (NEGRO, BLANCO):
-            cv2.putText(vista, v, (p0[0] + 4, p1[1] - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+            escala = max(0.5, (x1 - x0) / 90.0)
+            cv2.putText(vista, v, (p0[0] + 6, p1[1] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, escala, (0, 0, 0), 5,
+                        cv2.LINE_AA)
+            cv2.putText(vista, v, (p0[0] + 6, p1[1] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, escala, color, 2,
+                        cv2.LINE_AA)
     return vista
+
+
+def lado_a_lado(izquierda, derecha, alto=620):
+    """Junta el cuadro de la camara y el panel, los dos al mismo alto."""
+    def a_ese_alto(im):
+        f = alto / float(im.shape[0])
+        return cv2.resize(im, (max(1, int(im.shape[1] * f)), alto),
+                          interpolation=cv2.INTER_AREA)
+    izquierda = a_ese_alto(izquierda)
+    if derecha is None:
+        return izquierda
+    derecha = a_ese_alto(derecha)
+    separador = np.full((alto, 6, 3), 40, np.uint8)
+    return np.hstack([izquierda, separador, derecha])
 
 
 def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
@@ -673,31 +871,34 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
         print("(sin pantalla: se lee a ciegas)")
         return leer_de_la_camara(fuente, cuadros)
 
-    cap = cv2.VideoCapture(int(fuente) if str(fuente).isdigit() else fuente)
+    cap = abrir_camara(fuente)
     if not cap.isOpened():
         return None, "no se pudo abrir la camara", None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     plantillas = Plantillas()
     ventana = "Hoja - ESPACIO lee, Q sale"
     cv2.namedWindow(ventana, cv2.WINDOW_NORMAL)
 
-    votos, leidas, ultimo = {}, 0, None
-    forma_ultima = None
+    # La lectura va en otro hilo: aqui solo se captura y se dibuja, asi que la
+    # ventana corre a la velocidad de la camara y no a la del analisis.
+    lector = LectorDeFondo(plantillas, tamaño)
+    votos, margenes, leidas, ultimo = {}, {}, 0, None
+    forma_ultima, panel = None, None
     try:
         while True:
-            ok, f = cap.read()
+            ok, f = leer_cuadro(cap)
             if not ok:
                 break
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
             vista = f.copy() if f.ndim == 3 else cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+            lector.ofrecer(gris)
 
-            grid, nota, extra = leer_hoja(gris, plantillas, devolver_debug=True,
-                                          tamaño=tamaño)
+            salida = lector.ultimo()
+            grid, nota = (salida[0], salida[1]) if salida else (None, "mirando...")
             if grid is not None:
-                conf, derecha, cajas = extra[0], extra[1], extra[2]
+                conf, derecha, cajas = salida[2]
                 forma_ultima = (len(grid), len(grid[0]))
                 ultimo = (grid, conf)
+                panel = panel_de_lectura(derecha, cajas, grid, conf)
                 aviso = "%s  -  ESPACIO para leerla" % nota
                 color = (90, 200, 90)
             else:
@@ -716,22 +917,30 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
                 cv2.putText(vista, pie, (14, vista.shape[0] - 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
                             cv2.LINE_AA)
-            cv2.imshow(ventana, vista)
+            cv2.imshow(ventana, lado_a_lado(vista, panel))
 
             tecla = cv2.waitKey(1) & 0xFF
             if tecla in (ord("q"), ord("Q"), 27):
                 break
             if tecla == 32 and ultimo is not None:
                 # juntar esta lectura con las anteriores de la misma forma
-                grid, _ = ultimo
+                grid, conf = ultimo
                 leidas += 1
                 for i, fila in enumerate(grid):
                     for j, v in enumerate(fila):
-                        caja = votos.setdefault((forma_ultima, i, j), {})
+                        clave = (forma_ultima, i, j)
+                        caja = votos.setdefault(clave, {})
                         caja[v] = caja.get(v, 0) + 1
+                        # El margen contra las plantillas se guarda junto al
+                        # voto: es la unica senal que distingue una letra leida
+                        # con holgura de una que gano por los pelos, y sin el
+                        # la confianza final solo sabria de acuerdos.
+                        margenes.setdefault(clave, {}).setdefault(v, []).append(
+                            conf[i][j] if conf else 1.0)
                 if leidas >= cuadros:
                     break
     finally:
+        lector.parar()
         cap.release()
         cv2.destroyWindow(ventana)
 
@@ -749,7 +958,18 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
             if not caja:
                 fila.append(BLANCO); seg.append(0.0); continue
             v = max(caja, key=caja.get)
-            fila.append(v); seg.append(caja[v] / float(sum(caja.values())))
+            fila.append(v)
+            # Dos maneras distintas de dudar, y hacen falta las dos. Con la
+            # camara quieta las lecturas salen identicas y el acuerdo es
+            # siempre 1.0: creerle solo a el da un 100% de confianza a una
+            # letra mal leida. El margen de plantilla si la caza -las dos que
+            # fallaban en la hoja de prueba tenian 0.042 y 0.037, por debajo
+            # del 0.08 de DUDA-. Y al reves, si las lecturas NO se ponen de
+            # acuerdo da igual lo holgada que fuera cada una.
+            acuerdo = caja[v] / float(sum(caja.values()))
+            suyos = margenes.get((forma, i, j), {}).get(v, [])
+            seg.append(0.0 if acuerdo < ACUERDO_MIN
+                       else (float(np.median(suyos)) if suyos else 1.0))
         grid.append(fila); seguridad.append(seg)
     return grid, "%d x %d  (%d lecturas)" % (filas, cols, leidas), seguridad
 
