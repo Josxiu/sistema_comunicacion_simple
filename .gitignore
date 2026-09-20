@@ -4,3 +4,7 @@ __pycache__/
 # videos de prueba generados (25-65 MB cada uno)
 camara/pruebas/*.mp4
 camara/pruebas/hoja/hojas*/
+
+# fotos originales del telefono (43 MB, con GPS en el EXIF): las que se
+# suben son las reducidas de camara/pruebas/hoja/fotos/
+camara/pruebas/hoja/fotos_originales/
