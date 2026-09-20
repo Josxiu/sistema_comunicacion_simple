@@ -787,6 +787,106 @@ def pintar(grid, confianzas=None, duda=DUDA):
         print("   " + " ".join(marcas))
 
 
+def _calidad(grid, conf):
+    """Que tan convencido esta el comparador de letras de esta lectura.
+
+    Es el criterio para elegir entre las cuatro orientaciones. Una hoja bien
+    puesta da letras que se parecen mucho a alguna plantilla y poco a la
+    siguiente; la misma hoja de lado da trazos que no son ninguna letra y el
+    margen se hunde. Se mira solo las celdas con letra: los recuadros negros y
+    los blancos puntuan igual gire como gire.
+    """
+    if not grid or not conf:
+        return -1.0
+    margenes = [c for fila, fc in zip(grid, conf)
+                for v, c in zip(fila, fc) if v not in (NEGRO, BLANCO)]
+    if len(margenes) < 3:
+        return -1.0
+    return float(np.mean(margenes))
+
+
+# Por debajo de esta calidad la lectura no es de fiar y conviene repetir la
+# foto. Medido sobre las doce fotos del telefono: las que salieron perfectas
+# dan de 0,136 para arriba (64% de letras seguras) y las equivocadas se quedan
+# en 0,112 para abajo (57%). El hueco entre las dos es limpio.
+CALIDAD_FIRME = 0.125
+
+
+def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
+    """Prueba varias maneras de mirar la foto y se queda con la que convence.
+
+    Se prueban las cuatro vueltas de cuarto y, de cada una, la foto tal cual y
+    con un margen de papel añadido alrededor. Son ocho intentos y gana el que
+    deje las letras mas parecidas a alguna plantilla.
+
+    Por que las cuatro vueltas: las fotos salen giradas un cuarto mas a menudo
+    de lo que parece, y eso quitar_giro no lo puede arreglar -ese mide cuanto
+    se desvian las rayas, y a 90 grados el desvio es cero: la rejilla de una
+    cuadricula girada un cuarto de vuelta sigue siendo una rejilla perfecta-.
+    Lo unico que distingue las cuatro es la LETRA, que es el mismo criterio que
+    usa el detector de orientacion de Tesseract. Sobre el banco del telefono
+    tres fotos pasaron de ilegibles a perfectas solo con esto.
+
+    Por que el margen: si la tabla llega hasta el borde del encuadre, las
+    celdas del borde tocan el limite de la imagen y se descartan, y a veces se
+    va con ellas el marco entero. Añadir papel alrededor no inventa nada y
+    devuelve el caso al terreno normal; una foto paso de 37% a 100% asi.
+    """
+    plantillas = plantillas or Plantillas()
+    img = (ruta if isinstance(ruta, np.ndarray)
+           else cv2.imread(str(ruta), cv2.IMREAD_GRAYSCALE))
+    if img is None:
+        return None, "no se pudo abrir la imagen", None
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    papel = int(np.percentile(img, 90))
+    ancho = max(40, int(0.05 * max(img.shape)))
+    con_marco = cv2.copyMakeBorder(img, ancho, ancho, ancho, ancho,
+                                   cv2.BORDER_CONSTANT, value=papel)
+
+    # Se prueba primero la foto tal cual y sin girar, que es el caso normal, y
+    # si ya convence no se prueban las otras siete: ocho intentos cuestan ocho
+    # veces mas y la mayoria de las fotos salen bien a la primera.
+    mejor = (None, "no se ve ninguna cuadricula", None, -1.0, 0, False)
+    for base, orillado in ((img, False), (con_marco, True)):
+        if mejor[3] >= CALIDAD_FIRME:
+            break
+        vueltas = ((0, base),
+                   (90, cv2.rotate(base, cv2.ROTATE_90_CLOCKWISE)),
+                   (180, cv2.rotate(base, cv2.ROTATE_180)),
+                   (270, cv2.rotate(base, cv2.ROTATE_90_COUNTERCLOCKWISE)))
+        for grados, vista in vueltas:
+            if mejor[3] >= CALIDAD_FIRME:
+                break
+            t = tamaño
+            if t and grados in (90, 270):
+                t = (t[1], t[0])       # de canto, filas y columnas se cambian
+            grid, nota, conf = leer_hoja(vista, plantillas, tamaño=t)
+            q = _calidad(grid, conf)
+            if avisar:
+                avisar("   %3d grados%s -> %-12s calidad %.3f"
+                       % (grados, " con margen" if orillado else "          ",
+                          nota if grid else "no lee", q))
+            if q > mejor[3]:
+                mejor = (grid, nota, conf, q, grados, orillado)
+
+    grid, nota, conf, q, grados, orillado = mejor
+    if grid is None:
+        return None, nota, None
+    detalles = []
+    if grados:
+        detalles.append("girada %d grados" % grados)
+    if orillado:
+        detalles.append("con margen añadido")
+    if detalles:
+        nota = "%s  (%s)" % (nota, ", ".join(detalles))
+    if q < CALIDAD_FIRME:
+        nota += "\n   OJO: lectura floja (calidad %.3f). Repite la foto mas " \
+                "cerca, mas plana y sin sombras encima." % q
+    return grid, nota, conf
+
+
 def escoger_archivo():
     """Abre el dialogo de siempre para buscar la foto, sin escribir rutas."""
     try:
@@ -1007,7 +1107,7 @@ def main():
         args = [ruta]
 
     for ruta in args:
-        grid, nota, conf = leer_hoja(ruta, tamaño=tamaño)
+        grid, nota, conf = leer_hoja_girando(ruta, tamaño=tamaño)
         print("\n%s  ->  %s" % (Path(ruta).name, nota))
         if grid:
             pintar(grid, conf)
