@@ -8,3 +8,7 @@ camara/pruebas/hoja/hojas*/
 # fotos originales del telefono (43 MB, con GPS en el EXIF): las que se
 # suben son las reducidas de camara/pruebas/hoja/fotos/
 camara/pruebas/hoja/fotos_originales/
+
+# Pruebas con tesseract que no se suben al repositorio
+camara/pruebas/tx_camara_tesseract.py
+
