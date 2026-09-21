@@ -33,6 +33,31 @@ sys.path.insert(0, str(DIR_ACTUAL))                    # camara/pruebas/hoja/
 import rx_camara as C          # la codificacion compartida con el receptor
 import leer_hoja as LH         # pipeline de PDI para leer la hoja impresa
 
+# Donde van las fotos que el programa guarda mientras se usa. NO es fotos/:
+# esa carpeta esta versionada y es el banco de pruebas, asi que escribir ahi
+# ensucia el repositorio en cada captura y, peor, la captura con camara pisaba
+# fotos/captura_celular.jpg, que si estaba subida. capturas/ esta en
+# .gitignore, existe sola la primera vez y se puede borrar entera sin perder
+# nada: lo unico que hay dentro es la ultima foto usada.
+CARPETA_CAPTURAS = DIR_ACTUAL / "capturas"
+
+
+def guardar_captura(nombre, imagen):
+    """Guarda una foto de trabajo en capturas/ y devuelve su ruta, o None.
+
+    Si no se puede escribir -carpeta de solo lectura, disco lleno- no pasa
+    nada: la foto ya esta cargada en memoria y el programa sigue. Lo unico
+    que se pierde es poder re-recortarla desde el disco.
+    """
+    try:
+        CARPETA_CAPTURAS.mkdir(parents=True, exist_ok=True)
+        ruta = CARPETA_CAPTURAS / nombre
+        if cv2.imwrite(str(ruta), imagen):
+            return ruta
+    except Exception:
+        pass
+    return None
+
 
 # ##########################################################################
 #  0. PARAMETROS
@@ -1096,14 +1121,15 @@ class TxCamara(object):
             self.lbl_est.config(text="Error con la cámara: %s" % error, fg=ROJO)
             return
 
-        # Guardar copia de la foto capturada en la carpeta de fotos
-        carpeta_fotos = DIR_ACTUAL / "fotos"
-        carpeta_fotos.mkdir(parents=True, exist_ok=True)
-        ruta_guardada = carpeta_fotos / "captura_celular.jpg"
+        # La foto que se guarda es la del cuadro VOTADO, no la del ultimo que
+        # se miro: leer_hoja.mirar_con_la_camara congela las dos cosas -foto y
+        # diagnostico- en el momento del ESPACIO.
+        ruta_guardada = (guardar_captura("captura_camara.jpg", frame)
+                         if frame is not None else None)
         if frame is not None:
-            cv2.imwrite(str(ruta_guardada), frame)
-            self.ruta_fotografia = str(ruta_guardada)
             self.imagen_original = frame.copy()
+            self.ruta_fotografia = (str(ruta_guardada) if ruta_guardada
+                                    else "Cámara en vivo (%s)" % fuente)
         else:
             self.ruta_fotografia = "Cámara en vivo (%s)" % fuente
             self.imagen_original = None
@@ -1169,12 +1195,10 @@ class TxCamara(object):
             return
 
         # Guardar en disco copia del recorte o de la foto usada
-        carpeta_fotos = DIR_ACTUAL / "fotos"
-        carpeta_fotos.mkdir(parents=True, exist_ok=True)
         nombre_arch = "recorte_actual.jpg" if es_recorte else "captura_actual.jpg"
-        ruta_guardada = carpeta_fotos / nombre_arch
-        cv2.imwrite(str(ruta_guardada), recorte)
-        self.ruta_fotografia = str(ruta_guardada)
+        ruta_guardada = guardar_captura(nombre_arch, recorte)
+        if ruta_guardada is not None:
+            self.ruta_fotografia = str(ruta_guardada)
 
         self.parar()
         self.filas, self.cols = len(grid), len(grid[0])

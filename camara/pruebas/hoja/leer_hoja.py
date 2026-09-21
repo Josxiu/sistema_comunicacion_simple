@@ -927,13 +927,20 @@ class LectorDeFondo:
         self._hilo = threading.Thread(target=self._trabajar, daemon=True)
         self._hilo.start()
 
-    def ofrecer(self, gris):
-        """Deja un cuadro para analizar, pisando el que hubiera sin analizar."""
+    def ofrecer(self, gris, cuadro=None):
+        """Deja un cuadro para analizar, pisando el que hubiera sin analizar.
+
+        'cuadro' es la misma imagen en color, que se guarda para devolverla
+        JUNTO a la lectura. Hace falta: el analisis va por detras de la camara,
+        asi que el cuadro que se esta viendo cuando sale una lectura NO es el
+        que la produjo. Guardando la foto que se ve en pantalla se guardaba una
+        que no se corresponde con lo leido.
+        """
         with self._cerrojo:
-            self._pendiente = gris
+            self._pendiente = (gris, cuadro)
 
     def ultimo(self):
-        """La ultima lectura terminada: (grid, nota, extra), o None."""
+        """La ultima lectura terminada: ((grid, nota, extra), cuadro), o None."""
         with self._cerrojo:
             return self._salida
 
@@ -944,17 +951,18 @@ class LectorDeFondo:
     def _trabajar(self):
         while not self._parar:
             with self._cerrojo:
-                gris, self._pendiente = self._pendiente, None
-            if gris is None:
+                pendiente, self._pendiente = self._pendiente, None
+            if pendiente is None:
                 time.sleep(0.005)
                 continue
+            gris, cuadro = pendiente
             try:
                 salida = leer_hoja(gris, self.plantillas, devolver_debug=True,
                                    tamaño=self.tamaño)
             except Exception as e:                  # un cuadro malo no mata
                 salida = (None, "no se pudo leer: %s" % e, None)
             with self._cerrojo:
-                self._salida = salida
+                self._salida = (salida, cuadro)
 
 
 def leer_de_la_camara(fuente, cuadros=25, avisar=print):
@@ -971,10 +979,17 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
     plantillas = Plantillas()
     votos, margenes, leidas = {}, {}, 0
     try:
+        fallos = 0
         for _ in range(cuadros * 4):          # de sobra, por los cuadros malos
             ok, f = leer_cuadro(cap)
             if not ok:
-                break
+                # Igual que en mirar_con_la_camara: un cuadro perdido es un
+                # cuadro perdido, no el final de la camara.
+                fallos += 1
+                if fallos > 60:
+                    break
+                continue
+            fallos = 0
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
             grid, nota, conf = leer_hoja(gris, plantillas)
             if grid is None:
@@ -1445,23 +1460,47 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
     forma_ultima, panel = None, None
     ultimo_debug = (None, None)
     ultimo_frame = None
+    # Lo que de verdad se va a devolver: la foto y el diagnostico de la ULTIMA
+    # lectura VOTADA, no del ultimo cuadro que se miro. Ver el comentario del
+    # ESPACIO mas abajo.
+    votado_debug, votado_frame = (None, None), None
+    fallos = 0
     try:
         while True:
             ok, f = leer_cuadro(cap)
             if not ok:
+                # Un cuadro perdido NO es el final de la camara. DroidCam los
+                # tira a puñados cuando se gira el telefono y cambia de formato
+                # en caliente, y cortar al primero dejaba la sesion muerta con
+                # el telefono todavia enchufado. Se insiste un rato; si no
+                # vuelve ninguno en 60 intentos -dos segundos largos- entonces
+                # si se acabo.
+                fallos += 1
+                if fallos > 60:
+                    break
+                continue
+            fallos = 0
+            # Si la ventana se cerro con la X, waitKey ya no devuelve teclas y
+            # el bucle se quedaba dando vueltas para siempre con la camara
+            # abierta. Cerrarla es una forma legitima de salir.
+            try:
+                if cv2.getWindowProperty(ventana, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
                 break
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
             vista = f.copy() if f.ndim == 3 else cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
-            lector.ofrecer(gris)
+            lector.ofrecer(gris, vista)
 
-            salida = lector.ultimo()
+            guardado = lector.ultimo()
+            salida, cuadro_leido = guardado if guardado else (None, None)
             grid, nota = (salida[0], salida[1]) if salida else (None, "mirando...")
             if grid is not None:
                 conf, derecha, cajas = salida[2]
                 forma_ultima = (len(grid), len(grid[0]))
                 ultimo = (grid, conf)
                 ultimo_debug = (derecha, cajas)
-                ultimo_frame = f.copy()
+                ultimo_frame = cuadro_leido
                 panel = panel_de_lectura(derecha, cajas, grid, conf)
                 aviso = "%s  -  ESPACIO para leerla" % nota
                 color = (90, 200, 90)
@@ -1490,6 +1529,13 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
                 # juntar esta lectura con las anteriores de la misma forma
                 grid, conf = ultimo
                 leidas += 1
+                # La foto y el diagnostico se congelan AQUI, con la lectura que
+                # se acaba de votar. Antes se devolvia el ultimo cuadro mirado,
+                # que si despues se movia el encuadre -y se mueve, porque uno
+                # baja el telefono en cuanto pulsa- no tenia nada que ver con
+                # lo que se transmitia: se revisaba la matriz contra una foto
+                # que no era la suya.
+                votado_debug, votado_frame = ultimo_debug, ultimo_frame
                 for i, fila in enumerate(grid):
                     for j, v in enumerate(fila):
                         clave = (forma_ultima, i, j)
@@ -1506,7 +1552,12 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
     finally:
         lector.parar()
         cap.release()
-        cv2.destroyWindow(ventana)
+        # Si la ventana ya se cerro con la X, destruirla revienta; y reventar
+        # aqui, dentro del finally, se tragaria la lectura entera.
+        try:
+            cv2.destroyWindow(ventana)
+        except Exception:
+            pass
 
     if not votos:
         if devolver_debug:
@@ -1539,7 +1590,7 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
         grid.append(fila); seguridad.append(seg)
     res_nota = "%d x %d  (%d lecturas)" % (filas, cols, leidas)
     if devolver_debug:
-        return grid, res_nota, seguridad, ultimo_debug, ultimo_frame
+        return grid, res_nota, seguridad, votado_debug, votado_frame
     return grid, res_nota, seguridad
 
 
