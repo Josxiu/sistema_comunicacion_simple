@@ -619,20 +619,47 @@ def leer_cuadro(cap):
 def abrir_camara(fuente, ancho=1920, alto=1080):
     """Abre la camara pidiendole el tamano ANTES del primer cuadro.
 
-    El orden importa: pedir el tamano con el stream ya andando no es pedirlo.
-    El driver puede aceptar el cambio, seguir entregando el buffer viejo y
-    hacer que el siguiente read() aborte con "_step >= minstep". Pedido antes,
-    o lo da o no lo da, pero no miente. Si no lo da, se reabre sin forzar nada.
+    Soporta indice (0, 1, ...), nombre de camara ('droidcam', 'iriun') o URL (http://...).
+    Prueba backends adecuados (DSHOW, MSMF, ANY) para compatibilidad total con DroidCam y webcams.
     """
+    if isinstance(fuente, str) and "://" in fuente:
+        cap = cv2.VideoCapture(fuente, cv2.CAP_FFMPEG)
+        if cap.isOpened():
+            return cap
+        return cv2.VideoCapture(fuente)
+
+    # Si se paso texto con el nombre de la camara, resolver indice
+    if isinstance(fuente, str) and not fuente.isdigit():
+        try:
+            from pygrabber.dshow_graph import FilterGraph
+            for i, nom in enumerate(FilterGraph().get_input_devices()):
+                if fuente.lower() in nom.lower():
+                    fuente = i
+                    break
+        except Exception:
+            pass
+
     cual = int(fuente) if str(fuente).isdigit() else fuente
-    cap = cv2.VideoCapture(cual)
-    if not cap.isOpened():
-        return cap
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, ancho)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, alto)
-    if leer_cuadro(cap)[0]:
-        return cap
-    cap.release()
+    backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY] if sys.platform == "win32" else [cv2.CAP_ANY]
+
+    for be in backends:
+        try:
+            cap = cv2.VideoCapture(cual, be)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, ancho)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, alto)
+            if leer_cuadro(cap)[0]:
+                return cap
+            cap.release()
+            cap = cv2.VideoCapture(cual, be)
+            if cap.isOpened() and leer_cuadro(cap)[0]:
+                return cap
+            cap.release()
+        except Exception:
+            pass
+
     return cv2.VideoCapture(cual)
 
 
@@ -1230,8 +1257,37 @@ def main():
             args = [x for j, x in enumerate(args) if j not in (i, i + 1)]
             break
 
+    if args and args[0] in ("--camaras", "-c", "--listar-camaras"):
+        try:
+            from pygrabber.dshow_graph import FilterGraph
+            nombres = list(FilterGraph().get_input_devices())
+        except Exception:
+            nombres = []
+        print("Buscando camaras...")
+        for i in range(len(nombres) if nombres else 4):
+            nom = nombres[i] if (nombres and i < len(nombres)) else ("camara %d" % i)
+            cap = abrir_camara(i)
+            if cap.isOpened():
+                ok, f = leer_cuadro(cap)
+                res = "%dx%d" % (f.shape[1], f.shape[0]) if ok else "sin imagen"
+                print("  --camara %d   %-34s  %s" % (i, nom[:34], res))
+                cap.release()
+            elif nombres and i < len(nombres):
+                print("  --camara %d   %-34s  (disponible)" % (i, nom[:34]))
+        return
+
     if args and args[0] == "--camara":
         fuente = args[1] if len(args) > 1 else "0"
+        # Si se paso texto con nombre de camara (ej. --camara droidcam), resolverlo
+        if not fuente.isdigit() and "://" not in fuente:
+            try:
+                from pygrabber.dshow_graph import FilterGraph
+                for i, nom in enumerate(FilterGraph().get_input_devices()):
+                    if fuente.lower() in nom.lower():
+                        fuente = str(i)
+                        break
+            except Exception:
+                pass
         print("Mirando la hoja por la camara (%s). ESPACIO lee, Q sale."
               % fuente)
         grid, nota, seg = mirar_con_la_camara(fuente, tamaño)

@@ -491,26 +491,54 @@ class EditorDiagnostico(tk.Toplevel):
 #  2.6 SELECTOR Y CAPTURA CON CÁMARA / CELULAR
 # ##########################################################################
 
-def detectar_camaras_disponibles(hasta=4):
-    """Detecta qué cámaras locales responden y sus resoluciones."""
+def detectar_camaras_disponibles(hasta=8):
+    """Detecta las cámaras conectadas mostrando sus nombres reales (vía pygrabber / DirectShow)
+    y su resolución activa probando los backends del sistema (DSHOW, MSMF, ANY),
+    exactamente igual que en rx_camara.py.
+    """
+    nombres = C.nombres_camaras(hasta)
     encontradas = []
-    for i in range(hasta):
+
+    limite = max(len(nombres), hasta) if nombres else hasta
+    for i in range(limite):
+        nom_disp = nombres[i] if (nombres and i < len(nombres)) else ("Cámara %d" % i)
+        res_txt = None
         cap = None
-        try:
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                ok, f = cap.read()
-                if ok and f is not None:
-                    encontradas.append((str(i), "Cámara %d (%dx%d)" % (i, f.shape[1], f.shape[0])))
-                cap.release()
-        except Exception:
-            if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
+        for backend in C.backends_de_camara():
+            try:
+                cap = cv2.VideoCapture(i, backend)
+                if cap.isOpened():
+                    ok, f = C.leer_cuadro(cap)
+                    if not ok:
+                        for _ in range(3):
+                            ok2, f2 = C.leer_cuadro(cap)
+                            if ok2:
+                                ok, f = ok2, f2
+                                break
+                    if ok and f is not None:
+                        res_txt = "%dx%d" % (f.shape[1], f.shape[0])
+                        break
+            except Exception:
+                pass
+            finally:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+
+        if res_txt:
+            encontradas.append((str(i), "%d: %s (%s)" % (i, nom_disp, res_txt)))
+        elif nombres and i < len(nombres):
+            encontradas.append((str(i), "%d: %s (disponible)" % (i, nom_disp)))
+
+    if not encontradas and nombres:
+        for i, nom in enumerate(nombres):
+            encontradas.append((str(i), "%d: %s" % (i, nom)))
+
     if not encontradas:
-        encontradas.append(("0", "Cámara 0 (por defecto)"))
+        encontradas.append(("0", "0: Cámara por defecto"))
+
     return encontradas
 
 
@@ -523,7 +551,7 @@ class DialogoSelectorCamara(tk.Toplevel):
         self.title("Tomar foto con cámara / celular")
         self.configure(bg=FONDO)
         self.resizable(False, False)
-        self.geometry("460x270")
+        self.geometry("500x280")
 
         self._camaras = detectar_camaras_disponibles()
 
@@ -539,8 +567,15 @@ class DialogoSelectorCamara(tk.Toplevel):
                  font=("Segoe UI", 9)).pack(anchor="w")
 
         opciones = [etiq for _, etiq in self._camaras]
-        self.cbo = ttk.Combobox(frame_disp, values=opciones, state="readonly", width=42)
-        self.cbo.current(0)
+        self.cbo = ttk.Combobox(frame_disp, values=opciones, state="readonly", width=46)
+
+        # Si DroidCam está conectada, auto-seleccionarla; si no, la primera disponible
+        idx_defecto = 0
+        for i, (_, etiq) in enumerate(self._camaras):
+            if "droidcam" in etiq.lower():
+                idx_defecto = i
+                break
+        self.cbo.current(idx_defecto)
         self.cbo.pack(fill="x", pady=2)
 
         frame_url = tk.Frame(self, bg=FONDO)
@@ -1026,9 +1061,17 @@ class TxCamara(object):
         DialogoSelectorCamara(self.root, self._capturar_con_camara)
 
     def _capturar_con_camara(self, fuente):
-        """Inicia el visor en vivo, detecta la hoja y al presionar ESPACIO captura la foto."""
+        """Abre el visor en vivo con la rejilla y lectura en tiempo real."""
+        self.t0 = time.time()
+        etiq_fuente = fuente
+        if str(fuente).isdigit():
+            nombres = C.nombres_camaras()
+            idx = int(fuente)
+            if idx < len(nombres):
+                etiq_fuente = "%s (%s)" % (fuente, nombres[idx])
+
         self.lbl_est.config(
-            text="Abriendo visor en vivo (%s)... ESPACIO = capturar foto, Q = salir" % fuente,
+            text="Abriendo visor en vivo (%s)... ESPACIO = capturar foto, Q = salir" % etiq_fuente,
             fg=AMBAR)
         self.root.update_idletasks()
 
