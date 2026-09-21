@@ -1104,7 +1104,10 @@ def graficar_lectura(grid, nota, conf=None, derecha=None, cajas=None,
     print("   (grafica abierta: pulsa cualquier tecla o 'q' en la ventana para continuar)")
     if esperar:
         cv2.waitKey(0)
-        cv2.destroyWindow(nom_ventana)
+        try:
+            cv2.destroyWindow(nom_ventana)
+        except Exception:
+            pass
 
 
 def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
