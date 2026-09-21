@@ -14,9 +14,15 @@ Lo que se mide, en este orden de importancia:
 
 Las fotos estan en fotos/, reducidas a 1400 px y sin EXIF. La verdad de cada
 hoja esta copiada a mano mirando la foto: si se añade una foto, hay que
-añadir su hoja en H y la pareja en CASOS. polso.jpg es la hoja impresa con
+añadir su hoja en H y la pareja en CASOS. La hoja POLSO es la impresa con
 marco negro grueso; las matrices de la prueba no lo llevan, asi que sus
 errores cuentan menos de lo que parece.
+
+OJO AL CONTAR: son 27 fotos pero solo OCHO hojas distintas, porque cada hoja
+se fotografio varias veces. Un arreglo que gane celdas en una hoja las gana en
+todas sus fotos a la vez, asi que el total exagera; mirar tambien la columna
+de cada foto y cuantas hojas distintas mejoran. Por eso mismo, para el
+experimento de aprendizaje hay que separar entrenamiento y prueba por HOJA.
 """
 import sys, os, time, importlib.util
 import cv2
@@ -53,6 +59,18 @@ CASOS = [
     ("mensajele_horizontal.jpg", "MENSAJE"),
     ("mensajele2_vertical.jpg", "MENSAJE"),
     ("noche.jpg", "NOCHE"),
+    # Segunda tanda, de la misma noche. Son OTRAS TOMAS de las mismas ocho
+    # hojas, no hojas nuevas: sirven para ver si un arreglo aguanta un encuadre
+    # distinto o solo estaba aprendido de memoria sobre la foto de antes. Su
+    # verdad se copio mirando la hoja enderezada, no la salida del lector.
+    # Casi todas salieron giradas un cuarto de vuelta, que es justo el caso que
+    # mas se da con el telefono en la mano.
+    ("20260919_193140.jpg", "POLSO"), ("20260919_224856.jpg", "POLSO"),
+    ("20260919_224909.jpg", "MENSAJE"), ("20260919_224921.jpg", "MENSAJE"),
+    ("20260919_224936.jpg", "HAYLUZ"), ("20260919_224951.jpg", "TRAMANDA"),
+    ("20260919_225003.jpg", "YWP"), ("20260919_225012.jpg", "HXT"),
+    ("20260919_225021.jpg", "HXT"), ("20260919_225026.jpg", "YWP"),
+    ("20260919_225042.jpg", "NOCHE"), ("20260919_225049.jpg", "PULCO"),
 ]
 
 
