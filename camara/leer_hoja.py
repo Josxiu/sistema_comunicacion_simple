@@ -907,7 +907,15 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
             if permisiva is not None and v != NEGRO:
                 v2, _ = leer_celda(permisiva, x0, x1, y0, y1, plantillas,
                                    alta_perm, k)
-                if v2 != v:
+                # Una casilla VACIA que con el corte permisivo sale RECUADRO
+                # NEGRO no esta escondiendo ninguna letra: lo que pasa es que
+                # el corte permisivo, que es mas alto, se traga entera una
+                # celda con un poco de sombra. Medido sobre las 27 fotos: las
+                # 18 blancas que la estabilidad marcaba tenian tinta permisiva
+                # entre 0,999 y 1,000 -la celda COMPLETA-, mientras que el
+                # unico aviso de verdad, una letra tan desvaida que se leia
+                # vacia, daba 0,146, que es tinta de letra. No se solapan.
+                if v2 != v and not (v == BLANCO and v2 == NEGRO):
                     m = 0.0
             fila.append(v); conf.append(m)
         grid.append(fila); confianzas.append(conf)
