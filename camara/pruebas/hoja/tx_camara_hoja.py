@@ -197,17 +197,10 @@ class EditorDiagnostico(tk.Toplevel):
                            font=("Segoe UI", 12, "bold"))
         lbl_tit.pack(side="left")
 
-        q = LH._calidad(self.tx.grid, self.tx.confianzas)
-        if q >= LH.CALIDAD_FIRME:
-            txt_q, col_q = "Lectura Firme (calidad %.3f)" % q, VERDE
-        elif q > 0:
-            txt_q, col_q = "Lectura Dudosa (calidad %.3f · revisar ?)" % q, AMBAR
-        else:
-            txt_q, col_q = "Calidad N/D", "#aaaaaa"
-
-        self.lbl_q = tk.Label(top, text="  ·  " + txt_q, bg=PANEL, fg=col_q,
+        self.lbl_q = tk.Label(top, text="", bg=PANEL,
                               font=("Segoe UI", 10, "bold"))
         self.lbl_q.pack(side="left", padx=4)
+        self._estado_lectura()
 
         tk.Button(top, text="✓ Listo / Cerrar (Esc)", bg=CURSOR, fg="white",
                   font=("Segoe UI", 9, "bold"),
@@ -386,20 +379,36 @@ class EditorDiagnostico(tk.Toplevel):
         self.destroy()
         self.tx.recortar_fotografia()
 
+    def _estado_lectura(self):
+        """Lo que queda por hacer antes de transmitir, dicho sin rodeos.
+
+        Antes aqui se recalculaba la calidad con _calidad() sobre las
+        confianzas de la cuadricula. Ya no vale: esas confianzas llevan
+        los ceros de la comprobacion de estabilidad y las que el usuario
+        limpia al corregir, asi que el numero no se podia comparar con
+        CALIDAD_FIRME. Lo que importa es si la lectura fue floja y cuantas
+        ? quedan, y eso si cambia bien a medida que se corrige.
+        """
+        pendientes = self.tx.celdas_por_revisar()
+        if self.tx.lectura_floja:
+            txt, col = ("LECTURA FLOJA: revisa todas las celdas, "
+                        "no solo las ?  (%d ?)" % pendientes), ROJO
+        elif pendientes:
+            txt, col = "%d celdas por revisar (?)" % pendientes, AMBAR
+        else:
+            txt, col = "Nada pendiente de revisar", VERDE
+        self.lbl_q.config(text="  ·  " + txt, fg=col)
+
     def redibujar(self):
         if not self.winfo_exists():
             return
+        self._estado_lectura()
 
         f_act, c_act = self.cur
         val_act = (self.tx.grid[f_act][c_act]
                    if f_act < len(self.tx.grid) and c_act < len(self.tx.grid[0])
                    else "?")
-        duda_act = False
-        if (self.tx.confianzas and f_act < len(self.tx.confianzas)
-                and c_act < len(self.tx.confianzas[f_act])):
-            if (val_act not in (C.NEGRO, C.BLANCO)
-                    and self.tx.confianzas[f_act][c_act] < LH.DUDA):
-                duda_act = True
+        duda_act = LH.es_dudosa(self.tx.confianzas, f_act, c_act)
 
         info_txt = "Celda seleccionada: [Fila %d, Col %d]  ·  Valor: '%s'  [%s]" % (
             f_act + 1, c_act + 1, val_act, "⚠️ DUDOSA (?)" if duda_act else "✓ SEGURA"
@@ -457,12 +466,7 @@ class EditorDiagnostico(tk.Toplevel):
                 v = self.tx.grid[f][c]
                 x = mx0 + c * lado
                 y = my0 + f * lado
-                es_dudosa = False
-                if (self.tx.confianzas and f < len(self.tx.confianzas)
-                        and c < len(self.tx.confianzas[f])):
-                    if (v not in (C.NEGRO, C.BLANCO)
-                            and self.tx.confianzas[f][c] < LH.DUDA):
-                        es_dudosa = True
+                es_dudosa = LH.es_dudosa(self.tx.confianzas, f, c)
 
                 color_fondo = NEGRO if v == C.NEGRO else (BLANCO if not es_dudosa else "#ffe0b2")
                 self.cv_matriz.create_rectangle(x, y, x + lado, y + lado,
@@ -837,6 +841,11 @@ class TxCamara(object):
         self.filas, self.cols = 4, 4
         self.grid = []
         self.confianzas = None          # matriz de confianza de lectura de foto
+        # Si la ultima lectura de foto no llego a CALIDAD_FIRME. Con una lectura
+        # floja los VERDES tampoco son de fiar -la hoja con marco negro dio tres
+        # letras mal y en verde, con calidad 0.112-, asi que no basta con mirar
+        # los ?: hay que revisarla entera o repetir la foto.
+        self.lectura_floja = False
         self.debug_foto = None          # (derecha, cajas) para graficar
         self.ruta_fotografia = None
         self.cur = [0, 0]
@@ -1103,6 +1112,7 @@ class TxCamara(object):
         self.filas, self.cols = len(grid), len(grid[0])
         self.grid = grid
         self.confianzas = seguridad
+        self.lectura_floja = False      # la votacion no mide calidad global
         self.debug_foto = debug
         self.cur = [0, 0]
         self.historial = []
@@ -1115,7 +1125,7 @@ class TxCamara(object):
         if seguridad:
             for f in range(self.filas):
                 for c in range(self.cols):
-                    if grid[f][c] not in (C.NEGRO, C.BLANCO) and seguridad[f][c] < LH.DUDA:
+                    if LH.es_dudosa(seguridad, f, c):
                         dudas += 1
 
         msg = "Matriz %dx%d capturada con cámara" % (self.filas, self.cols)
@@ -1170,6 +1180,7 @@ class TxCamara(object):
         self.filas, self.cols = len(grid), len(grid[0])
         self.grid = grid
         self.confianzas = conf
+        self.lectura_floja = LH.AVISO_FLOJA in (nota or "")
         self.debug_foto = debug
         self.cur = [0, 0]
         self.historial = []
@@ -1182,13 +1193,16 @@ class TxCamara(object):
         if conf:
             for f in range(self.filas):
                 for c in range(self.cols):
-                    if grid[f][c] not in (C.NEGRO, C.BLANCO) and conf[f][c] < LH.DUDA:
+                    if LH.es_dudosa(conf, f, c):
                         dudas += 1
 
         msg = "Matriz %dx%d cargada desde %s" % (
             self.filas, self.cols,
             "recorte" if es_recorte else Path(self.ruta_fotografia).name)
-        if dudas > 0:
+        if self.lectura_floja:
+            msg += " · ⚠️ LECTURA FLOJA: revísala entera o repite la foto"
+            self.lbl_est.config(text=msg, fg=ROJO)
+        elif dudas > 0:
             msg += " · ⚠️ %d celdas dudosas marcadas con '?'" % dudas
             self.lbl_est.config(text=msg, fg=AMBAR)
         else:
@@ -1221,6 +1235,7 @@ class TxCamara(object):
         self.grid = [[self.grid[i][j] if i < self.filas and j < self.cols
                       else C.NEGRO for j in range(c)] for i in range(f)]
         self.confianzas = None
+        self.lectura_floja = False
         self.filas, self.cols = f, c
         self.cur = [min(self.cur[0], f - 1), min(self.cur[1], c - 1)]
         self._regenerar()
@@ -1236,6 +1251,7 @@ class TxCamara(object):
         self.filas, self.cols = filas, cols
         self.grid = [[C.NEGRO] * cols for _ in range(filas)]
         self.confianzas = None
+        self.lectura_floja = False
         self.debug_foto = None
         self.ruta_fotografia = None
         self.cur = [0, 0]
@@ -1251,6 +1267,7 @@ class TxCamara(object):
         self._guardar_undo()
         self.grid = [[C.NEGRO] * self.cols for _ in range(self.filas)]
         self.confianzas = None
+        self.lectura_floja = False
         self.cur = [0, 0]
         self._regenerar()
         self.foco_cuadricula()
@@ -1503,9 +1520,39 @@ class TxCamara(object):
             return
         self.emitir()
 
+    def celdas_por_revisar(self):
+        """Cuantas celdas siguen marcadas como dudosas (editarla la limpia)."""
+        if not self.confianzas:
+            return 0
+        return sum(1 for f in range(self.filas) for c in range(self.cols)
+                   if LH.es_dudosa(self.confianzas, f, c))
+
     def emitir(self):
         if not self.simbolos:
             return
+        # Lo que se transmite es lo que queda en la cuadricula, y una celda
+        # dudosa sin revisar puede ser una letra mal leida que viaja tal cual
+        # hasta el receptor, con CRC valido y todo: el CRC protege la trama,
+        # no la foto. Por eso se pregunta antes de emitir.
+        pendientes = self.celdas_por_revisar()
+        if pendientes or self.lectura_floja:
+            partes = []
+            if self.lectura_floja:
+                partes.append("La lectura de la foto salió FLOJA: ni siquiera "
+                              "las celdas verdes son de fiar. Revisa la matriz "
+                              "entera contra la foto, o repite la foto.")
+            if pendientes:
+                partes.append("Quedan %d celdas dudosas (?) sin revisar. "
+                              "Escribir encima de una la da por revisada."
+                              % pendientes)
+            if not messagebox.askyesno(
+                    "Revisar antes de transmitir",
+                    "\n\n".join(partes) + "\n\n¿Transmitir de todos modos?",
+                    icon="warning"):
+                return
+            # Aceptada una vez para esta matriz, ya no se insiste con la
+            # calidad; con las ? si, mientras queden.
+            self.lectura_floja = False
         if not self.arduino and self.pantalla is None:
             messagebox.showwarning(
                 "Nada que mueva las luces",
@@ -1658,10 +1705,9 @@ class TxCamara(object):
                                   font=("Segoe UI", int(s * 0.55), "bold"))
 
                 # Resaltar si la celda se leyó de foto con duda
-                if conf and i < len(conf) and j < len(conf[i]):
-                    if v not in (C.NEGRO, C.BLANCO) and conf[i][j] < LH.DUDA:
-                        c.create_text(x + s - 7, y + 8, text="?", fill=ROJO,
-                                      font=("Segoe UI", max(8, int(s * 0.28)), "bold"))
+                if LH.es_dudosa(conf, i, j):
+                    c.create_text(x + s - 7, y + 8, text="?", fill=ROJO,
+                                  font=("Segoe UI", max(8, int(s * 0.28)), "bold"))
 
         if self.modo == "editar":
             i, j = self.cur

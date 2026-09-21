@@ -75,6 +75,15 @@ def hay_pantalla():
             _HAY_PANTALLA = False
     return _HAY_PANTALLA
 
+# Cuanta inclinacion aguanta la busqueda del marco sin girar la foto: tiene que
+# cubrir los 1.5 grados que quitar_giro deja pasar mas lo que su medida baila
+# con el papel curvado, que se vio de casi un grado. Ver rayas().
+HOLGURA_MARCO = 3.0
+
+# Si una celda se lee distinto con el corte permisivo de tinta_permisiva(), se
+# marca como dudosa. Ver el bucle de celdas de leer_hoja.
+COMPROBAR_ESTABILIDAD = True
+
 LADO_PLANTILLA = 32       # la letra normalizada, en pixeles
 LADO_CELDA = 64           # a cuanto se lleva cada celda al enderezar
 MARGEN_CELDA = 0.18       # cuanto se recorta por dentro para no coger la raya
@@ -121,14 +130,34 @@ def sin_solidos(binaria, lado_min):
     return cv2.bitwise_and(binaria, cv2.bitwise_not(solidos))
 
 
-def rayas(binaria, lado_min):
-    """Las rayas horizontales y verticales de la tabla, sin letras ni solidos."""
+def rayas(binaria, lado_min, holgura_grados=0.0):
+    """Las rayas horizontales y verticales de la tabla, sin letras ni solidos.
+
+    'holgura_grados' deja pasar rayas algo inclinadas. La apertura busca n
+    pixeles SEGUIDOS en linea recta, y una raya inclinada un angulo t solo los
+    tiene si su grosor llega a n*tan(t): con n=98 y la raya impresa de 2 px,
+    basta 1.2 grados para perderla. Y 1.2 grados es justo lo que quitar_giro
+    deja sin corregir -no gira por debajo de 1.5, con motivo-, asi que el hueco
+    no era teorico: en una foto de cerca con la hoja curvada, la misma imagen
+    media 2.2 grados (se giraba y leia perfecta) o 1.3 (no se giraba, el marco
+    salia hecho pedazos y se tomaba un trozo de 340x173 por la tabla entera),
+    segun diferencias de 4 niveles de gris en pixeles sueltos.
+
+    Engordar la imagen en perpendicular -en vertical para buscar horizontales
+    y al reves- da ese grosor sin alargar nada: un trazo de letra no se hace
+    mas LARGO por engordarlo, asi que no se cuela. Solo se usa para buscar el
+    marco; las celdas se cuentan sin holgura sobre la hoja ya enderezada.
+    """
     n = max(8, lado_min)
     limpia = sin_solidos(binaria, n)
 
-    hor = cv2.morphologyEx(limpia, cv2.MORPH_OPEN,
+    g = int(np.ceil(n * np.tan(np.radians(holgura_grados)) / 2.0))
+    alta = cv2.dilate(limpia, np.ones((2 * g + 1, 1), np.uint8)) if g else limpia
+    ancha = cv2.dilate(limpia, np.ones((1, 2 * g + 1), np.uint8)) if g else limpia
+
+    hor = cv2.morphologyEx(alta, cv2.MORPH_OPEN,
                            cv2.getStructuringElement(cv2.MORPH_RECT, (n, 1)))
-    ver = cv2.morphologyEx(limpia, cv2.MORPH_OPEN,
+    ver = cv2.morphologyEx(ancha, cv2.MORPH_OPEN,
                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, n)))
     return hor, ver
 
@@ -505,14 +534,51 @@ def tinta_de_la_hoja(derecha, lado_celda):
     # Se veian celdas completamente negras con 0,15 de tinta y se leian como
     # letra. Un cuarto de la hoja siempre alcanza papel, y la sombra varia lo
     # bastante despacio como para que siga siguiendola.
+    _, b = cv2.threshold(hoja_aplanada(derecha, lado_celda), 0, 255,
+                         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    return b
+
+
+def hoja_aplanada(derecha, lado_celda):
+    """La hoja dividida por su propio blanco de papel. Ver tinta_de_la_hoja."""
     k = int(max(9, lado_celda * 4)) | 1
     papel = cv2.dilate(derecha, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     papel = desenfoque_grande(papel, k)
     plano = np.clip(derecha.astype(np.float32) * 220.0
                     / np.maximum(papel.astype(np.float32), 1), 0, 255)
-    _, b = cv2.threshold(plano.astype(np.uint8), 0, 255,
-                         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    return b
+    return plano.astype(np.uint8)
+
+
+def tinta_permisiva(derecha, lado_celda):
+    """La hoja binarizada con un umbral pensado para las LETRAS, no la hoja.
+
+    El Otsu de tinta_de_la_hoja lo deciden los recuadros negros: son la mitad
+    de la hoja y estan a ~75 contra un papel a ~200, asi que el corte cae hacia
+    128. Una letra nitida tiene el trazo a ~110 y entra. Pero una fila que
+    salio algo desenfocada tiene el trazo a 145, POR ENCIMA del corte, y se
+    pierde entera o a trozos: sobre la hoja HAY LUZ, la T de TRAMA se quedaba
+    sin su barra y se leia I, y la A se quedaba sin tinta y se leia vacia.
+
+    Aqui el corte se calcula solo con lo que NO es recuadro negro -papel y
+    trazos-, que es la pregunta que de verdad importa para una letra. No
+    sustituye al otro: subir el corte para todos convierte en letra las
+    casillas vacias que tienen algo de sombra o de raya colada, y eso se vio
+    en varias fotos. Se usa solo para comprobar que la lectura es ESTABLE.
+    """
+    plano = hoja_aplanada(derecha, lado_celda)
+    t0, b0 = cv2.threshold(plano, 0, 255,
+                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    s = max(5, int(lado_celda * 0.5))
+    solidos = cv2.morphologyEx(
+        b0, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (s, s)))
+    solidos = cv2.dilate(solidos, np.ones((5, 5), np.uint8))
+    resto = plano[solidos == 0]
+    if resto.size < 100:
+        return b0
+    t1, _ = cv2.threshold(resto.reshape(-1, 1), 0, 255,
+                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, b1 = cv2.threshold(plano, max(t0, t1), 255, cv2.THRESH_BINARY_INV)
+    return b1
 
 
 def leer_celda(binaria, x0, x1, y0, y1, plantillas):
@@ -541,8 +607,15 @@ def leer_celda(binaria, x0, x1, y0, y1, plantillas):
 # ------------------------------------------------- 5. todo junto ----------
 
 def leer_hoja(ruta, plantillas=None, devolver_debug=False,
-              tamaño=None):
-    """De la foto a la matriz. Devuelve (grid, nota, confianzas)."""
+              tamaño=None, estabilidad=None):
+    """De la foto a la matriz. Devuelve (grid, nota, confianzas).
+
+    'estabilidad' decide si se hace la comprobacion con el corte permisivo;
+    None es lo que diga COMPROBAR_ESTABILIDAD. leer_hoja_girando la apaga
+    mientras compara orientaciones, que es para lo que se calibro CALIDAD_FIRME.
+    """
+    if estabilidad is None:
+        estabilidad = COMPROBAR_ESTABILIDAD
     # acepta una ruta o un cuadro ya cargado (la camara entrega cuadros)
     img = (ruta if isinstance(ruta, np.ndarray)
            else cv2.imread(str(ruta), cv2.IMREAD_GRAYSCALE))
@@ -557,7 +630,7 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
     img = quitar_giro(img)
     b = binarizar(aplanar_luz(img))
     n = max(12, min(img.shape) // 14)
-    hor, ver = rayas(b, n)
+    hor, ver = rayas(b, n, holgura_grados=HOLGURA_MARCO)
     # Para el MARCO se juntan las rayas con los recuadros negros. Buscarlo solo
     # con las rayas falla en cuanto hay negros pegados al borde: ahi el borde
     # es negro sobre negro, la raya no existe y el contorno del marco se parte
@@ -579,6 +652,7 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
 
     lado = np.median([x1 - x0 for x0, y0, x1, y1 in cajas.values()])
     binaria = tinta_de_la_hoja(derecha, lado)
+    permisiva = tinta_permisiva(derecha, lado) if estabilidad else None
 
     plantillas = plantillas or Plantillas()
     grid, confianzas = [], []
@@ -590,6 +664,18 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
                 fila.append(BLANCO); conf.append(0.0); continue
             x0, y0, x1, y1 = caja
             v, m = leer_celda(binaria, x0, x1, y0, y1, plantillas)
+            # Una lectura solo se da por buena si AGUANTA un umbral algo mas
+            # permisivo. Cuando una letra pierde un trazo por quedar justo
+            # encima del corte, lo que queda suele ser OTRA letra perfectamente
+            # nitida -la T sin barra ES una I, y la E sin barras tambien- y el
+            # margen contra las plantillas no lo puede notar: la I que queda se
+            # parece a la plantilla de la I muchisimo. Lo que si lo nota es
+            # volver a mirar con el corte mas alto y ver aparecer la barra.
+            # No cambia la letra, solo la confianza: no puede leer peor.
+            if permisiva is not None and v != NEGRO:
+                v2, _ = leer_celda(permisiva, x0, x1, y0, y1, plantillas)
+                if v2 != v:
+                    m = 0.0
             fila.append(v); conf.append(m)
         grid.append(fila); confianzas.append(conf)
     nota = "%d x %d" % (len(grid), len(grid[0]))
@@ -804,6 +890,20 @@ DUDA = 0.08
 ACUERDO_MIN = 0.6
 
 
+def es_dudosa(confianzas, f, c, duda=DUDA):
+    """Si la celda (f, c) hay que revisarla a ojo. La regla, en un solo sitio.
+
+    Vale para CUALQUIER celda, no solo para las letras. Antes el ? solo salia
+    en letras, y eso dejaba ciegos dos casos que si ocurren: una letra tan
+    desvaida que se lee como casilla VACIA (la A de TRAMA en la hoja HAY LUZ,
+    que la comprobacion de estabilidad caza pero que no se veia), y en camara
+    una casilla cuyos votos no se ponen de acuerdo entre negro y letra.
+    """
+    if not confianzas or f >= len(confianzas) or c >= len(confianzas[f]):
+        return False
+    return confianzas[f][c] < duda
+
+
 def pintar(grid, confianzas=None, duda=DUDA):
     """La matriz, marcando con ? al lado de lo que no quedo claro."""
     for i, fila in enumerate(grid):
@@ -837,6 +937,10 @@ def _calidad(grid, conf):
 # dan de 0,136 para arriba (64% de letras seguras) y las equivocadas se quedan
 # en 0,112 para abajo (57%). El hueco entre las dos es limpio.
 CALIDAD_FIRME = 0.125
+
+# Lo que lleva la nota cuando la lectura no llega a CALIDAD_FIRME. Es una
+# constante para que tx_camara_hoja lo pueda buscar sin copiar el texto.
+AVISO_FLOJA = "OJO: lectura floja"
 
 
 def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None,
@@ -878,7 +982,8 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None,
     # Se prueba primero la foto tal cual y sin girar, que es el caso normal, y
     # si ya convence no se prueban las otras siete: ocho intentos cuestan ocho
     # veces mas y la mayoria de las fotos salen bien a la primera.
-    mejor = (None, "no se ve ninguna cuadricula", None, -1.0, 0, False, None)
+    mejor = (None, "no se ve ninguna cuadricula", None, -1.0, 0, False, None,
+             None, None)
     for base, orillado in ((img, False), (con_marco, True)):
         if mejor[3] >= CALIDAD_FIRME:
             break
@@ -892,22 +997,32 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None,
             t = tamaño
             if t and grados in (90, 270):
                 t = (t[1], t[0])       # de canto, filas y columnas se cambian
-            if devolver_debug:
-                grid, nota, extra = leer_hoja(
-                    vista, plantillas, tamaño=t, devolver_debug=True)
-                conf = extra[0] if extra else None
-            else:
-                grid, nota, conf = leer_hoja(vista, plantillas, tamaño=t)
-                extra = None
+            # Se compara con los margenes PUROS de las plantillas. La
+            # comprobacion de estabilidad baja a cero las celdas inestables, y
+            # eso hundiria la calidad de una hoja bien puesta: CALIDAD_FIRME se
+            # midio sin ella, y con ella una hoja perfecta dejaba de llegar al
+            # listón y se ponian a probar las ocho vueltas.
+            grid, nota, extra = leer_hoja(
+                vista, plantillas, tamaño=t, devolver_debug=True,
+                estabilidad=False)
+            conf = extra[0] if extra else None
             q = _calidad(grid, conf)
             if avisar:
                 avisar("   %3d grados%s -> %-12s calidad %.3f"
                        % (grados, " con margen" if orillado else "          ",
                           nota if grid else "no lee", q))
             if q > mejor[3]:
-                mejor = (grid, nota, conf, q, grados, orillado, extra)
+                mejor = (grid, nota, conf, q, grados, orillado, extra, vista, t)
 
-    grid, nota, conf, q, grados, orillado, extra = mejor
+    grid, nota, conf, q, grados, orillado, extra, vista, t = mejor
+    if grid is not None and COMPROBAR_ESTABILIDAD:
+        # La orientacion ya esta elegida; ahora si, la lectura definitiva
+        # con la comprobacion de estabilidad. Es una pasada mas, solo una.
+        grid2, nota2, extra2 = leer_hoja(vista, plantillas, tamaño=t,
+                                         devolver_debug=True, estabilidad=True)
+        if grid2 is not None:
+            grid, nota, extra = grid2, nota2, extra2
+            conf = extra[0]
     if grid is None:
         if devolver_debug:
             return None, nota, None, None
@@ -920,8 +1035,8 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None,
     if detalles:
         nota = "%s  (%s)" % (nota, ", ".join(detalles))
     if q < CALIDAD_FIRME:
-        nota += "\n   OJO: lectura floja (calidad %.3f). Repite la foto mas " \
-                "cerca, mas plana y sin sombras encima." % q
+        nota += "\n   %s (calidad %.3f). Repite la foto mas " \
+                "cerca, mas plana y sin sombras encima." % (AVISO_FLOJA, q)
     if devolver_debug:
         debug_info = (extra[1], extra[2]) if (extra and len(extra) >= 3) else (None, None)
         return grid, nota, conf, debug_info
@@ -977,13 +1092,38 @@ def panel_de_lectura(derecha, cajas, grid, conf, duda=DUDA):
         cv2.rectangle(vista, p0, p1, color, 2)
         if v not in (NEGRO, BLANCO):
             escala = max(0.5, (x1 - x0) / 90.0)
-            cv2.putText(vista, v, (p0[0] + 6, p1[1] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, escala, (0, 0, 0), 5,
-                        cv2.LINE_AA)
-            cv2.putText(vista, v, (p0[0] + 6, p1[1] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, escala, color, 2,
-                        cv2.LINE_AA)
+            poner_letra(vista, v, (p0[0] + 6, p1[1] - 8), escala, (0, 0, 0), 5)
+            poner_letra(vista, v, (p0[0] + 6, p1[1] - 8), escala, color, 2)
     return vista
+
+
+def medir_letra(v, escala, grosor):
+    """cv2.getTextSize de la letra tal como la dibuja poner_letra."""
+    return cv2.getTextSize("N" if v == "Ñ" else v, cv2.FONT_HERSHEY_SIMPLEX,
+                           escala, grosor)
+
+
+def poner_letra(img, v, org, escala, color, grosor):
+    """cv2.putText, pero sabiendo escribir la Ñ.
+
+    Las fuentes Hershey de OpenCV solo traen ASCII: cualquier otra cosa sale
+    como '??'. En el diagnostico la Ñ aparecia en verde con '??' encima, que
+    parece una duda y no lo es -la lectura era buena, lo que no sabia era
+    dibujarla-; la ventana principal, que es de Tkinter, si la mostraba bien.
+    Aqui se escribe una N y se le traza la virgulilla encima a mano.
+    """
+    cv2.putText(img, "N" if v == "Ñ" else v, org, cv2.FONT_HERSHEY_SIMPLEX,
+                escala, color, grosor, cv2.LINE_AA)
+    if v != "Ñ":
+        return
+    (tw, th), _ = cv2.getTextSize("N", cv2.FONT_HERSHEY_SIMPLEX, escala, grosor)
+    x0 = org[0] + tw * 0.15
+    y = org[1] - th - max(3.0, th * 0.22)
+    ancho, alto = tw * 0.7, max(1.5, th * 0.12)
+    u = np.linspace(0.0, 1.0, 14)
+    pts = np.stack([x0 + ancho * u, y - alto * np.sin(2 * np.pi * u)], 1)
+    cv2.polylines(img, [pts.astype(np.int32)], False, color, max(1, grosor),
+                  cv2.LINE_AA)
 
 
 def lado_a_lado(izquierda, derecha, alto=620):
@@ -1018,18 +1158,24 @@ def tablero_digital(grid, conf=None, alto_target=620, duda=DUDA):
                 cv2.rectangle(t, (x0, y0), (x1, y1), (20, 20, 20), -1)
                 cv2.rectangle(t, (x0, y0), (x1, y1), (70, 70, 70), 1)
             elif v == BLANCO:
-                cv2.rectangle(t, (x0, y0), (x1, y1), (245, 245, 245), -1)
-                cv2.rectangle(t, (x0, y0), (x1, y1), (180, 180, 180), 1)
+                cv2.rectangle(t, (x0, y0), (x1, y1),
+                              (245, 245, 245) if seguro else (180, 215, 255), -1)
+                cv2.rectangle(t, (x0, y0), (x1, y1),
+                              (180, 180, 180) if seguro else (30, 90, 240),
+                              1 if seguro else 2)
+                if not seguro:
+                    cv2.putText(t, '?', (x1 - 13, y0 + 15), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45, (0, 0, 220), 1, cv2.LINE_AA)
             else:
                 fondo = (240, 240, 240) if seguro else (180, 215, 255)
                 cv2.rectangle(t, (x0, y0), (x1, y1), fondo, -1)
                 borde = (90, 200, 90) if seguro else (30, 90, 240)
                 cv2.rectangle(t, (x0, y0), (x1, y1), borde, 2 if not seguro else 1)
                 escala = max(0.5, lado / 46.0)
-                (tw, th), _ = cv2.getTextSize(v, cv2.FONT_HERSHEY_SIMPLEX, escala, 2)
+                (tw, th), _ = medir_letra(v, escala, 2)
                 tx = x0 + (lado - tw) // 2
                 ty = y0 + (lado + th) // 2
-                cv2.putText(t, v, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, escala, (15, 15, 15), 2, cv2.LINE_AA)
+                poner_letra(t, v, (tx, ty), escala, (15, 15, 15), 2)
                 if not seguro:
                     cv2.putText(t, '?', (x1 - 13, y0 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 220), 1, cv2.LINE_AA)
     return t
@@ -1064,19 +1210,24 @@ def graficar_lectura(grid, nota, conf=None, derecha=None, cajas=None,
     pie_alto = 32
 
     banner = np.full((banner_alto, ancho_total, 3), 26, dtype=np.uint8)
-    q = _calidad(grid, conf)
-    if q >= CALIDAD_FIRME:
-        color_q = (90, 200, 90)
-        estado_q = "Lectura Firme"
-    elif q > 0:
+    # La calidad se lee de la nota y no se recalcula con _calidad(): las
+    # confianzas que llegan aqui ya llevan los ceros de la comprobacion de
+    # estabilidad, y recalcularla daria un numero que no se puede comparar
+    # con CALIDAD_FIRME.
+    pendientes = sum(1 for f in range(len(grid)) for c in range(len(grid[0]))
+                     if es_dudosa(conf, f, c))
+    if AVISO_FLOJA in (nota or ""):
+        color_q = (60, 60, 230)
+        estado_q = "Lectura FLOJA: revisa todas, no solo las ?"
+    elif pendientes:
         color_q = (50, 120, 240)
-        estado_q = "Lectura Dudosa (revisar naranja ?)"
+        estado_q = "Lectura firme - %d por revisar (?)" % pendientes
     else:
-        color_q = (180, 180, 180)
-        estado_q = "Calidad N/D"
+        color_q = (90, 200, 90)
+        estado_q = "Lectura firme - nada por revisar"
 
     texto_izq = "%s   -   %s" % (titulo, nota.split("\n")[0])
-    texto_der = "Calidad: %.3f (%s)" % (q, estado_q) if q > 0 else estado_q
+    texto_der = estado_q
     cv2.putText(banner, texto_izq, (14, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                 (240, 240, 240), 2, cv2.LINE_AA)
     (tw, _), _ = cv2.getTextSize(texto_der, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
