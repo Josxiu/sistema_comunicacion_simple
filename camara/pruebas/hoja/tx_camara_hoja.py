@@ -212,6 +212,9 @@ class EditorDiagnostico(tk.Toplevel):
         tk.Button(top, text="✓ Listo / Cerrar (Esc)", bg=CURSOR, fg="white",
                   font=("Segoe UI", 9, "bold"),
                   command=self.destroy).pack(side="right", padx=4)
+        tk.Button(top, text="✂️ Re-recortar foto", bg="#2b6b55", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self._reencuadrar).pack(side="right", padx=4)
         tk.Button(top, text="Deshacer (Ctrl+Z)", bg="#333333", fg="white",
                   font=("Segoe UI", 9),
                   command=self.deshacer).pack(side="right", padx=6)
@@ -378,6 +381,10 @@ class EditorDiagnostico(tk.Toplevel):
         self.tx.cur = list(cur)
         self.tx._regenerar()
         self.redibujar()
+
+    def _reencuadrar(self):
+        self.destroy()
+        self.tx.recortar_fotografia()
 
     def redibujar(self):
         if not self.winfo_exists():
@@ -575,15 +582,15 @@ class DialogoSelectorCamara(tk.Toplevel):
 # ##########################################################################
 
 class VentanaRecorte(tk.Toplevel):
-    """Ventana interactiva para encuadrar y recortar la matriz de una fotografía.
+    """Ventana interactiva para revisar, recortar y encuadrar la matriz de una fotografía.
 
     Permite:
-      - Arrastrar un recuadro con el ratón alrededor de la cuadrícula.
+      - Arrastrar un recuadro con el ratón alrededor de la cuadrícula (opcional).
       - Girar la imagen 90° si está de lado.
-      - Aplicar el recorte y enviar directamente la región encuadrada al analizador.
+      - Continuar directamente con la foto completa o con el área recortada.
     """
 
-    def __init__(self, master, imagen, on_aplicar, titulo="Recortar foto"):
+    def __init__(self, master, imagen, on_aplicar, titulo="Foto"):
         super().__init__(master)
         self.master = master
         self.imagen_original = imagen.copy()
@@ -591,7 +598,7 @@ class VentanaRecorte(tk.Toplevel):
         self.on_aplicar = on_aplicar
         self.titulo = titulo
 
-        self.title("✂️ Recortar y Encuadrar Matriz")
+        self.title("📷 Revisar y Recortar Foto")
         self.configure(bg=FONDO)
         self.geometry("960x720")
         self.minsize(750, 520)
@@ -615,24 +622,29 @@ class VentanaRecorte(tk.Toplevel):
         top = tk.Frame(self, bg=PANEL)
         top.pack(fill="x", padx=10, pady=8)
 
-        tk.Label(top, text="✂️ Encuadrar la matriz  ·  " + self.titulo,
+        tk.Label(top, text="📷 " + self.titulo,
                  bg=PANEL, fg=AZUL, font=("Segoe UI", 12, "bold")).pack(side="left")
 
-        tk.Button(top, text="✓ Aplicar recorte (Enter)", bg="#2b6b55", fg="white",
+        tk.Button(top, text="✓ Continuar y Analizar (Enter)", bg="#2b6b55", fg="white",
                   font=("Segoe UI", 9, "bold"),
                   command=self._aplicar).pack(side="right", padx=4)
-        tk.Button(top, text="Cancelar (Esc)", bg="#333333", fg="white",
+        tk.Button(top, text="🖼️ Foto completa", bg="#3a4f66", fg="white",
                   font=("Segoe UI", 9),
-                  command=self.destroy).pack(side="right", padx=4)
+                  command=self._quitar_recorte).pack(side="right", padx=4)
         tk.Button(top, text="🔄 Girar 90°", bg="#444444", fg="white",
                   font=("Segoe UI", 9),
                   command=self._girar_90).pack(side="right", padx=6)
         tk.Button(top, text="↺ Restablecer", bg="#444444", fg="white",
                   font=("Segoe UI", 9),
                   command=self._restablecer).pack(side="right", padx=2)
+        tk.Button(top, text="Cancelar (Esc)", bg="#333333", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self.destroy).pack(side="right", padx=4)
 
-        self.lbl_dims = tk.Label(self, text="Arrastra con el ratón para seleccionar el área de la matriz.",
-                                 bg=FONDO, fg=AMBAR, font=("Segoe UI", 10, "bold"), anchor="w")
+        self.lbl_dims = tk.Label(
+            self,
+            text="Arrastra con el ratón sobre la foto para recortar la matriz si lo deseas, o pulsa Enter para continuar completa.",
+            bg=FONDO, fg=AMBAR, font=("Segoe UI", 10, "bold"), anchor="w")
         self.lbl_dims.pack(fill="x", padx=14, pady=(2, 4))
 
         marco_canvas = tk.Frame(self, bg=NEGRO, bd=1, relief="sunken")
@@ -647,7 +659,7 @@ class VentanaRecorte(tk.Toplevel):
 
         pie = tk.Frame(self, bg=FONDO)
         pie.pack(fill="x", padx=10, pady=(2, 8))
-        tk.Label(pie, text="💡 Consejo: Recorta dejando un borde pequeño de papel alrededor de la tabla. Pulsa Enter para aplicar.",
+        tk.Label(pie, text="💡 Consejo: Si recortas, deja un borde pequeño de papel blanco alrededor de la tabla. Enter para aplicar.",
                  bg=FONDO, fg="#888888", font=("Segoe UI", 9)).pack(side="left")
 
     def _cargar_imagen(self):
@@ -676,12 +688,18 @@ class VentanaRecorte(tk.Toplevel):
         self.canvas.delete("all")
         self.canvas.create_image(self._offset_x, self._offset_y, anchor="nw", image=self._img_tk)
 
-        # Si hay selección activa, dibujarla; si no, seleccionar el 90% central por defecto
-        if self.sel_rect is None:
-            marg_x = int(W * 0.05)
-            marg_y = int(H * 0.05)
-            self.sel_rect = (marg_x, marg_y, W - marg_x, H - marg_y)
-        self._dibujar_seleccion()
+        if self.sel_rect:
+            self._dibujar_seleccion()
+        else:
+            self.lbl_dims.config(
+                text="Arrastra con el ratón sobre la foto para recortar la matriz si lo deseas, o pulsa Enter para continuar completa.")
+
+    def _quitar_recorte(self):
+        self.sel_rect = None
+        self.canvas.delete("sel_box")
+        self.canvas.delete("sel_temp")
+        self.lbl_dims.config(
+            text="Foto completa seleccionada (sin recorte)  ·  Pulsa Enter para analizar")
 
     def _on_press(self, ev):
         self.start_x = max(self._offset_x, min(self._offset_x + self._disp_w, ev.x))
@@ -743,7 +761,7 @@ class VentanaRecorte(tk.Toplevel):
 
         w_px, h_px = int(ix1 - ix0), int(iy1 - iy0)
         self.lbl_dims.config(
-            text="Recorte seleccionado: %d × %d píxeles  (Enter para aplicar)" % (w_px, h_px))
+            text="Recorte seleccionado: %d × %d píxeles  (Enter para aplicar, o 'Foto completa' para quitar)" % (w_px, h_px))
 
     def _girar_90(self):
         self.imagen_actual = cv2.rotate(self.imagen_actual, cv2.ROTATE_90_CLOCKWISE)
@@ -758,11 +776,16 @@ class VentanaRecorte(tk.Toplevel):
     def _aplicar(self):
         if self.sel_rect is None:
             recorte = self.imagen_actual.copy()
+            es_recorte = False
         else:
             x0, y0, x1, y1 = self.sel_rect
             recorte = self.imagen_actual[y0:y1, x0:x1].copy()
+            es_recorte = True
         self.destroy()
-        self.on_aplicar(recorte)
+        try:
+            self.on_aplicar(recorte, es_recorte)
+        except TypeError:
+            self.on_aplicar(recorte)
 
 
 # ##########################################################################
@@ -836,9 +859,6 @@ class TxCamara(object):
         tk.Button(top, text="📱 Tomar foto con cámara", bg="#1b6ca8", fg="white",
                   font=("Segoe UI", 9, "bold"),
                   command=self.tomar_foto_camara).pack(side="left", padx=2)
-        tk.Button(top, text="✂️ Recortar foto", bg="#2b6b55", fg="white",
-                  font=("Segoe UI", 9, "bold"),
-                  command=self.recortar_fotografia).pack(side="left", padx=2)
         self.btn_diag = tk.Button(top, text="🔍 Ver diagnóstico",
                                   command=self.ver_diagnostico_foto)
         self.btn_diag.pack(side="left", padx=2)
@@ -979,8 +999,7 @@ class TxCamara(object):
 
     # ------------------------------------------------ carga desde foto --
     def buscar_fotografia(self):
-        """Carga una fotografía de la hoja y llena la cuadrícula con lo que lee."""
-        self.t0 = time.time()
+        """Abre el explorador de archivos e inmediatamente muestra la foto para revisarla y recortarla si se desea."""
         ruta = filedialog.askopenfilename(
             title="Seleccionar fotografía de la hoja",
             filetypes=[
@@ -991,55 +1010,16 @@ class TxCamara(object):
         if not ruta:
             return
 
-        # Guardar imagen original completa para permitir recortes posteriores
         img_leida = cv2.imread(str(ruta))
-        if img_leida is not None:
-            self.imagen_original = img_leida
-
-        self.lbl_est.config(
-            text="Analizando fotografía con leer_hoja (quitar giro, homografía y plantillas)...",
-            fg=AMBAR)
-        self.root.update_idletasks()
-
-        try:
-            # Pipeline de PDI robusto (sin tesseract): devuelve grid y debug para graficar
-            grid, nota, conf, debug = LH.leer_hoja_girando(ruta, devolver_debug=True)
-            if not grid:
-                raise ValueError("No se pudo detectar la cuadrícula en la foto (%s)" % nota)
-        except Exception as error:
-            messagebox.showerror("Leer fotografía", str(error))
-            self.lbl_est.config(text="Error al leer foto: %s" % error, fg=ROJO)
+        if img_leida is None:
+            messagebox.showerror("Leer fotografía", "No se pudo abrir la imagen seleccionada.")
             return
 
-        self.ruta_fotografia = ruta
-        self.parar()
-        self.filas, self.cols = len(grid), len(grid[0])
-        self.grid = grid
-        self.confianzas = conf
-        self.debug_foto = debug
-        self.cur = [0, 0]
-        self.historial = []
-        self.modo = "editar"
-        self.btn_modo.config(text="TRANSMITIR (F5)", bg=CURSOR)
-        self._regenerar()
-        self.foco_cuadricula()
+        self.imagen_original = img_leida
+        self.ruta_fotografia = str(ruta)
 
-        dudas = 0
-        if conf:
-            for f in range(self.filas):
-                for c in range(self.cols):
-                    if grid[f][c] not in (C.NEGRO, C.BLANCO) and conf[f][c] < LH.DUDA:
-                        dudas += 1
-
-        msg = "Matriz %dx%d cargada desde %s" % (self.filas, self.cols, Path(ruta).name)
-        if dudas > 0:
-            msg += " · ⚠️ %d celdas dudosas marcadas con '?'" % dudas
-            self.lbl_est.config(text=msg, fg=AMBAR)
-        else:
-            self.lbl_est.config(text=msg, fg=VERDE)
-
-        # Abrir inmediatamente el editor de diagnóstico lado a lado
-        self.ver_diagnostico_foto()
+        VentanaRecorte(self.root, self.imagen_original, self._aplicar_recorte,
+                       titulo=Path(ruta).name)
 
     def tomar_foto_camara(self):
         """Abre el diálogo para seleccionar cámara o celular e iniciar visor en vivo."""
@@ -1109,48 +1089,39 @@ class TxCamara(object):
     def recortar_fotografia(self):
         """Abre la herramienta interactiva de recorte y encuadre."""
         if getattr(self, "imagen_original", None) is None:
-            # Si no hay imagen cargada, abrir diálogo para buscar una
-            ruta = filedialog.askopenfilename(
-                title="Seleccionar foto para recortar",
-                filetypes=[
-                    ("Imágenes", "*.png *.jpg *.jpeg *.bmp *.heic *.PNG *.JPG *.JPEG *.BMP"),
-                    ("Todos los archivos", "*.*"),
-                ],
-            )
-            if not ruta:
-                return
-            img = cv2.imread(str(ruta))
-            if img is None:
-                messagebox.showerror("Recortar", "No se pudo abrir la imagen seleccionada.")
-                return
-            self.imagen_original = img
-            self.ruta_fotografia = ruta
+            self.buscar_fotografia()
+            return
 
         VentanaRecorte(self.root, self.imagen_original, self._aplicar_recorte,
                        titulo=Path(self.ruta_fotografia).name if self.ruta_fotografia else "Foto")
 
-    def _aplicar_recorte(self, recorte):
-        """Aplica el recorte realizado por el usuario, lo analiza y actualiza la matriz."""
-        self.lbl_est.config(text="Analizando recorte de la matriz...", fg=AMBAR)
+    def _aplicar_recorte(self, recorte, es_recorte=False):
+        """Aplica la foto (recortada o completa), analiza con leer_hoja y actualiza la matriz."""
+        self.lbl_est.config(
+            text="Analizando matriz con leer_hoja (quitar giro, homografía y plantillas)...",
+            fg=AMBAR)
         self.root.update_idletasks()
 
         try:
             grid, nota, conf, debug = LH.leer_hoja_girando(recorte, devolver_debug=True)
             if not grid:
-                raise ValueError("No se detectó la cuadrícula en la zona recortada (%s)" % nota)
+                raise ValueError("No se detectó la cuadrícula en la imagen (%s)" % nota)
         except Exception as error:
-            messagebox.showwarning(
-                "Recorte de matriz",
-                "%s\n\nPrueba ajustando el recuadro dejando un pequeño borde de papel alrededor de la tabla." % error)
-            self.lbl_est.config(text="No se detectó cuadrícula en el recorte", fg=ROJO)
+            resp = messagebox.askretrycancel(
+                "Detección de matriz",
+                "%s\n\n¿Deseas volver a encuadrar la imagen dejando un pequeño borde de papel blanco alrededor de la tabla?" % error)
+            self.lbl_est.config(text="No se detectó cuadrícula en la imagen", fg=ROJO)
+            if resp and getattr(self, "imagen_original", None) is not None:
+                self.root.after(80, self.recortar_fotografia)
             return
 
-        # Guardar recorte en disco
+        # Guardar en disco copia del recorte o de la foto usada
         carpeta_fotos = DIR_ACTUAL / "fotos"
         carpeta_fotos.mkdir(parents=True, exist_ok=True)
-        ruta_recorte = carpeta_fotos / "recorte_actual.jpg"
-        cv2.imwrite(str(ruta_recorte), recorte)
-        self.ruta_fotografia = str(ruta_recorte)
+        nombre_arch = "recorte_actual.jpg" if es_recorte else "captura_actual.jpg"
+        ruta_guardada = carpeta_fotos / nombre_arch
+        cv2.imwrite(str(ruta_guardada), recorte)
+        self.ruta_fotografia = str(ruta_guardada)
 
         self.parar()
         self.filas, self.cols = len(grid), len(grid[0])
@@ -1171,7 +1142,9 @@ class TxCamara(object):
                     if grid[f][c] not in (C.NEGRO, C.BLANCO) and conf[f][c] < LH.DUDA:
                         dudas += 1
 
-        msg = "Matriz %dx%d cargada desde recorte" % (self.filas, self.cols)
+        msg = "Matriz %dx%d cargada desde %s" % (
+            self.filas, self.cols,
+            "recorte" if es_recorte else Path(self.ruta_fotografia).name)
         if dudas > 0:
             msg += " · ⚠️ %d celdas dudosas marcadas con '?'" % dudas
             self.lbl_est.config(text=msg, fg=AMBAR)
