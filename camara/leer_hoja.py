@@ -1107,7 +1107,7 @@ def _calidad(grid, conf):
 CALIDAD_FIRME = 0.125
 
 # Lo que lleva la nota cuando la lectura no llega a CALIDAD_FIRME. Es una
-# constante para que tx_camara_hoja lo pueda buscar sin copiar el texto.
+# constante para que tx_camara.py lo pueda buscar sin copiar el texto.
 AVISO_FLOJA = "OJO: lectura floja"
 
 
