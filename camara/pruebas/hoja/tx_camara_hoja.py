@@ -571,6 +571,201 @@ class DialogoSelectorCamara(tk.Toplevel):
 
 
 # ##########################################################################
+#  2.7 HERRAMIENTA INTERACTIVA DE RECORTE Y ENCUADRE
+# ##########################################################################
+
+class VentanaRecorte(tk.Toplevel):
+    """Ventana interactiva para encuadrar y recortar la matriz de una fotografía.
+
+    Permite:
+      - Arrastrar un recuadro con el ratón alrededor de la cuadrícula.
+      - Girar la imagen 90° si está de lado.
+      - Aplicar el recorte y enviar directamente la región encuadrada al analizador.
+    """
+
+    def __init__(self, master, imagen, on_aplicar, titulo="Recortar foto"):
+        super().__init__(master)
+        self.master = master
+        self.imagen_original = imagen.copy()
+        self.imagen_actual = imagen.copy()
+        self.on_aplicar = on_aplicar
+        self.titulo = titulo
+
+        self.title("✂️ Recortar y Encuadrar Matriz")
+        self.configure(bg=FONDO)
+        self.geometry("960x720")
+        self.minsize(750, 520)
+
+        self.start_x = None
+        self.start_y = None
+        self.sel_rect = None       # (ix0, iy0, ix1, iy1) en coords de imagen_actual
+        self._escala = 1.0
+        self._offset_x = 0
+        self._offset_y = 0
+        self._disp_w = 100
+        self._disp_h = 100
+        self._img_tk = None
+
+        self._construir()
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Return>", lambda e: self._aplicar())
+        self.after(60, self._cargar_imagen)
+
+    def _construir(self):
+        top = tk.Frame(self, bg=PANEL)
+        top.pack(fill="x", padx=10, pady=8)
+
+        tk.Label(top, text="✂️ Encuadrar la matriz  ·  " + self.titulo,
+                 bg=PANEL, fg=AZUL, font=("Segoe UI", 12, "bold")).pack(side="left")
+
+        tk.Button(top, text="✓ Aplicar recorte (Enter)", bg="#2b6b55", fg="white",
+                  font=("Segoe UI", 9, "bold"),
+                  command=self._aplicar).pack(side="right", padx=4)
+        tk.Button(top, text="Cancelar (Esc)", bg="#333333", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self.destroy).pack(side="right", padx=4)
+        tk.Button(top, text="🔄 Girar 90°", bg="#444444", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self._girar_90).pack(side="right", padx=6)
+        tk.Button(top, text="↺ Restablecer", bg="#444444", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self._restablecer).pack(side="right", padx=2)
+
+        self.lbl_dims = tk.Label(self, text="Arrastra con el ratón para seleccionar el área de la matriz.",
+                                 bg=FONDO, fg=AMBAR, font=("Segoe UI", 10, "bold"), anchor="w")
+        self.lbl_dims.pack(fill="x", padx=14, pady=(2, 4))
+
+        marco_canvas = tk.Frame(self, bg=NEGRO, bd=1, relief="sunken")
+        marco_canvas.pack(fill="both", expand=True, padx=10, pady=4)
+
+        self.canvas = tk.Canvas(marco_canvas, bg="#0d0d0d", cursor="cross", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Configure>", lambda e: self._cargar_imagen())
+
+        pie = tk.Frame(self, bg=FONDO)
+        pie.pack(fill="x", padx=10, pady=(2, 8))
+        tk.Label(pie, text="💡 Consejo: Recorta dejando un borde pequeño de papel alrededor de la tabla. Pulsa Enter para aplicar.",
+                 bg=FONDO, fg="#888888", font=("Segoe UI", 9)).pack(side="left")
+
+    def _cargar_imagen(self):
+        if not self.winfo_exists():
+            return
+        cw = max(200, self.canvas.winfo_width())
+        ch = max(200, self.canvas.winfo_height())
+        H, W = self.imagen_actual.shape[:2]
+
+        factor = min(cw / float(W), ch / float(H), 1.0)
+        disp_w = max(20, int(W * factor))
+        disp_h = max(20, int(H * factor))
+        self._escala = factor
+        self._disp_w = disp_w
+        self._disp_h = disp_h
+        self._offset_x = (cw - disp_w) // 2
+        self._offset_y = (ch - disp_h) // 2
+
+        res = cv2.resize(self.imagen_actual, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        if res.ndim == 2:
+            rgb = cv2.cvtColor(res, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(res, cv2.COLOR_BGR2RGB)
+        self._img_tk = ImageTk.PhotoImage(Image.fromarray(rgb))
+
+        self.canvas.delete("all")
+        self.canvas.create_image(self._offset_x, self._offset_y, anchor="nw", image=self._img_tk)
+
+        # Si hay selección activa, dibujarla; si no, seleccionar el 90% central por defecto
+        if self.sel_rect is None:
+            marg_x = int(W * 0.05)
+            marg_y = int(H * 0.05)
+            self.sel_rect = (marg_x, marg_y, W - marg_x, H - marg_y)
+        self._dibujar_seleccion()
+
+    def _on_press(self, ev):
+        self.start_x = max(self._offset_x, min(self._offset_x + self._disp_w, ev.x))
+        self.start_y = max(self._offset_y, min(self._offset_y + self._disp_h, ev.y))
+
+    def _on_drag(self, ev):
+        if self.start_x is None:
+            return
+        cur_x = max(self._offset_x, min(self._offset_x + self._disp_w, ev.x))
+        cur_y = max(self._offset_y, min(self._offset_y + self._disp_h, ev.y))
+        self.canvas.delete("sel_temp")
+        self.canvas.create_rectangle(self.start_x, self.start_y, cur_x, cur_y,
+                                    outline="#ffd54f", width=2, dash=(6, 3), tags="sel_temp")
+        w_px = int(abs(cur_x - self.start_x) / self._escala)
+        h_px = int(abs(cur_y - self.start_y) / self._escala)
+        self.lbl_dims.config(text="Área de recorte: %d × %d píxeles" % (w_px, h_px))
+
+    def _on_release(self, ev):
+        if self.start_x is None:
+            return
+        cur_x = max(self._offset_x, min(self._offset_x + self._disp_w, ev.x))
+        cur_y = max(self._offset_y, min(self._offset_y + self._disp_h, ev.y))
+        x0, x1 = min(self.start_x, cur_x), max(self.start_x, cur_x)
+        y0, y1 = min(self.start_y, cur_y), max(self.start_y, cur_y)
+
+        # Si el arrastre fue insignificante, ignorar
+        if (x1 - x0) > 15 and (y1 - y0) > 15:
+            ix0 = (x0 - self._offset_x) / self._escala
+            iy0 = (y0 - self._offset_y) / self._escala
+            ix1 = (x1 - self._offset_x) / self._escala
+            iy1 = (y1 - self._offset_y) / self._escala
+            H, W = self.imagen_actual.shape[:2]
+            ix0 = max(0, min(W - 20, int(ix0)))
+            iy0 = max(0, min(H - 20, int(iy0)))
+            ix1 = max(ix0 + 20, min(W, int(ix1)))
+            iy1 = max(iy0 + 20, min(H, int(iy1)))
+            self.sel_rect = (ix0, iy0, ix1, iy1)
+
+        self.start_x, self.start_y = None, None
+        self._dibujar_seleccion()
+
+    def _dibujar_seleccion(self):
+        self.canvas.delete("sel_box")
+        self.canvas.delete("sel_temp")
+        if not self.sel_rect:
+            return
+        ix0, iy0, ix1, iy1 = self.sel_rect
+        sx0 = self._offset_x + ix0 * self._escala
+        sy0 = self._offset_y + iy0 * self._escala
+        sx1 = self._offset_x + ix1 * self._escala
+        sy1 = self._offset_y + iy1 * self._escala
+
+        self.canvas.create_rectangle(sx0, sy0, sx1, sy1,
+                                    outline="#ffd54f", width=3, tags="sel_box")
+        # Esquinas marcadas
+        for ex, ey in ((sx0, sy0), (sx1, sy0), (sx0, sy1), (sx1, sy1)):
+            self.canvas.create_oval(ex - 4, ey - 4, ex + 4, ey + 4,
+                                    fill="#2f7de1", outline="white", tags="sel_box")
+
+        w_px, h_px = int(ix1 - ix0), int(iy1 - iy0)
+        self.lbl_dims.config(
+            text="Recorte seleccionado: %d × %d píxeles  (Enter para aplicar)" % (w_px, h_px))
+
+    def _girar_90(self):
+        self.imagen_actual = cv2.rotate(self.imagen_actual, cv2.ROTATE_90_CLOCKWISE)
+        self.sel_rect = None
+        self._cargar_imagen()
+
+    def _restablecer(self):
+        self.imagen_actual = self.imagen_original.copy()
+        self.sel_rect = None
+        self._cargar_imagen()
+
+    def _aplicar(self):
+        if self.sel_rect is None:
+            recorte = self.imagen_actual.copy()
+        else:
+            x0, y0, x1, y1 = self.sel_rect
+            recorte = self.imagen_actual[y0:y1, x0:x1].copy()
+        self.destroy()
+        self.on_aplicar(recorte)
+
+
+# ##########################################################################
 #  3. LA VENTANA
 # ##########################################################################
 
@@ -641,6 +836,9 @@ class TxCamara(object):
         tk.Button(top, text="📱 Tomar foto con cámara", bg="#1b6ca8", fg="white",
                   font=("Segoe UI", 9, "bold"),
                   command=self.tomar_foto_camara).pack(side="left", padx=2)
+        tk.Button(top, text="✂️ Recortar foto", bg="#2b6b55", fg="white",
+                  font=("Segoe UI", 9, "bold"),
+                  command=self.recortar_fotografia).pack(side="left", padx=2)
         self.btn_diag = tk.Button(top, text="🔍 Ver diagnóstico",
                                   command=self.ver_diagnostico_foto)
         self.btn_diag.pack(side="left", padx=2)
@@ -793,6 +991,11 @@ class TxCamara(object):
         if not ruta:
             return
 
+        # Guardar imagen original completa para permitir recortes posteriores
+        img_leida = cv2.imread(str(ruta))
+        if img_leida is not None:
+            self.imagen_original = img_leida
+
         self.lbl_est.config(
             text="Analizando fotografía con leer_hoja (quitar giro, homografía y plantillas)...",
             fg=AMBAR)
@@ -868,8 +1071,10 @@ class TxCamara(object):
         if frame is not None:
             cv2.imwrite(str(ruta_guardada), frame)
             self.ruta_fotografia = str(ruta_guardada)
+            self.imagen_original = frame.copy()
         else:
             self.ruta_fotografia = "Cámara en vivo (%s)" % fuente
+            self.imagen_original = None
 
         self.parar()
         self.filas, self.cols = len(grid), len(grid[0])
@@ -898,6 +1103,81 @@ class TxCamara(object):
             self.lbl_est.config(text=msg, fg=VERDE)
 
         # Abrir inmediatamente el Editor de Diagnóstico para comparar y editar lado a lado
+        if debug and debug[0] is not None:
+            self.ver_diagnostico_foto()
+
+    def recortar_fotografia(self):
+        """Abre la herramienta interactiva de recorte y encuadre."""
+        if getattr(self, "imagen_original", None) is None:
+            # Si no hay imagen cargada, abrir diálogo para buscar una
+            ruta = filedialog.askopenfilename(
+                title="Seleccionar foto para recortar",
+                filetypes=[
+                    ("Imágenes", "*.png *.jpg *.jpeg *.bmp *.heic *.PNG *.JPG *.JPEG *.BMP"),
+                    ("Todos los archivos", "*.*"),
+                ],
+            )
+            if not ruta:
+                return
+            img = cv2.imread(str(ruta))
+            if img is None:
+                messagebox.showerror("Recortar", "No se pudo abrir la imagen seleccionada.")
+                return
+            self.imagen_original = img
+            self.ruta_fotografia = ruta
+
+        VentanaRecorte(self.root, self.imagen_original, self._aplicar_recorte,
+                       titulo=Path(self.ruta_fotografia).name if self.ruta_fotografia else "Foto")
+
+    def _aplicar_recorte(self, recorte):
+        """Aplica el recorte realizado por el usuario, lo analiza y actualiza la matriz."""
+        self.lbl_est.config(text="Analizando recorte de la matriz...", fg=AMBAR)
+        self.root.update_idletasks()
+
+        try:
+            grid, nota, conf, debug = LH.leer_hoja_girando(recorte, devolver_debug=True)
+            if not grid:
+                raise ValueError("No se detectó la cuadrícula en la zona recortada (%s)" % nota)
+        except Exception as error:
+            messagebox.showwarning(
+                "Recorte de matriz",
+                "%s\n\nPrueba ajustando el recuadro dejando un pequeño borde de papel alrededor de la tabla." % error)
+            self.lbl_est.config(text="No se detectó cuadrícula en el recorte", fg=ROJO)
+            return
+
+        # Guardar recorte en disco
+        carpeta_fotos = DIR_ACTUAL / "fotos"
+        carpeta_fotos.mkdir(parents=True, exist_ok=True)
+        ruta_recorte = carpeta_fotos / "recorte_actual.jpg"
+        cv2.imwrite(str(ruta_recorte), recorte)
+        self.ruta_fotografia = str(ruta_recorte)
+
+        self.parar()
+        self.filas, self.cols = len(grid), len(grid[0])
+        self.grid = grid
+        self.confianzas = conf
+        self.debug_foto = debug
+        self.cur = [0, 0]
+        self.historial = []
+        self.modo = "editar"
+        self.btn_modo.config(text="TRANSMITIR (F5)", bg=CURSOR)
+        self._regenerar()
+        self.foco_cuadricula()
+
+        dudas = 0
+        if conf:
+            for f in range(self.filas):
+                for c in range(self.cols):
+                    if grid[f][c] not in (C.NEGRO, C.BLANCO) and conf[f][c] < LH.DUDA:
+                        dudas += 1
+
+        msg = "Matriz %dx%d cargada desde recorte" % (self.filas, self.cols)
+        if dudas > 0:
+            msg += " · ⚠️ %d celdas dudosas marcadas con '?'" % dudas
+            self.lbl_est.config(text=msg, fg=AMBAR)
+        else:
+            self.lbl_est.config(text=msg, fg=VERDE)
+
         if debug and debug[0] is not None:
             self.ver_diagnostico_foto()
 
