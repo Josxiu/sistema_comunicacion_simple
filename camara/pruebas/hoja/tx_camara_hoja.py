@@ -481,6 +481,96 @@ class EditorDiagnostico(tk.Toplevel):
 
 
 # ##########################################################################
+#  2.6 SELECTOR Y CAPTURA CON CÁMARA / CELULAR
+# ##########################################################################
+
+def detectar_camaras_disponibles(hasta=4):
+    """Detecta qué cámaras locales responden y sus resoluciones."""
+    encontradas = []
+    for i in range(hasta):
+        cap = None
+        try:
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                ok, f = cap.read()
+                if ok and f is not None:
+                    encontradas.append((str(i), "Cámara %d (%dx%d)" % (i, f.shape[1], f.shape[0])))
+                cap.release()
+        except Exception:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+    if not encontradas:
+        encontradas.append(("0", "Cámara 0 (por defecto)"))
+    return encontradas
+
+
+class DialogoSelectorCamara(tk.Toplevel):
+    """Diálogo para escoger entre cámaras locales o conectar celular por URL."""
+
+    def __init__(self, master, on_conectar):
+        super().__init__(master)
+        self.on_conectar = on_conectar
+        self.title("Tomar foto con cámara / celular")
+        self.configure(bg=FONDO)
+        self.resizable(False, False)
+        self.geometry("460x270")
+
+        self._camaras = detectar_camaras_disponibles()
+
+        tk.Label(self, text="Seleccionar cámara o celular", bg=FONDO, fg=AZUL,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(self, text="Apunta la cámara a la hoja para ver la rejilla en vivo.\n"
+                            "En el visor: ESPACIO captura la foto, Q o Esc sale.",
+                 bg=FONDO, fg="#aaaaaa", font=("Segoe UI", 9), justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+
+        frame_disp = tk.Frame(self, bg=FONDO)
+        frame_disp.pack(fill="x", padx=16, pady=4)
+        tk.Label(frame_disp, text="Dispositivo detectado:", bg=FONDO, fg="white",
+                 font=("Segoe UI", 9)).pack(anchor="w")
+
+        opciones = [etiq for _, etiq in self._camaras]
+        self.cbo = ttk.Combobox(frame_disp, values=opciones, state="readonly", width=42)
+        self.cbo.current(0)
+        self.cbo.pack(fill="x", pady=2)
+
+        frame_url = tk.Frame(self, bg=FONDO)
+        frame_url.pack(fill="x", padx=16, pady=6)
+        tk.Label(frame_url, text="O escribe la URL del celular (IP Webcam / Wi-Fi):",
+                 bg=FONDO, fg="#cccccc", font=("Segoe UI", 9)).pack(anchor="w")
+        self.ent_url = tk.Entry(frame_url, font=("Consolas", 9), bg="#2b2b2b",
+                                fg="white", insertbackground="white")
+        self.ent_url.pack(fill="x", pady=2)
+        tk.Label(frame_url, text="Ejemplo: http://192.168.1.50:8080/video (déjalo vacío si usas webcam o DroidCam)",
+                 bg=FONDO, fg="#777777", font=("Segoe UI", 8)).pack(anchor="w")
+
+        bot = tk.Frame(self, bg=FONDO)
+        bot.pack(fill="x", padx=16, pady=(12, 10))
+
+        tk.Button(bot, text="📸 Iniciar visor en vivo", bg="#1b6ca8", fg="white",
+                  font=("Segoe UI", 10, "bold"),
+                  command=self._iniciar).pack(side="left")
+        tk.Button(bot, text="Cancelar", bg="#333333", fg="white",
+                  font=("Segoe UI", 10),
+                  command=self.destroy).pack(side="right")
+
+        self.transient(master)
+        self.grab_set()
+
+    def _iniciar(self):
+        url = self.ent_url.get().strip()
+        if url:
+            fuente = url
+        else:
+            idx = self.cbo.current()
+            fuente = self._camaras[idx][0] if 0 <= idx < len(self._camaras) else "0"
+        self.destroy()
+        self.on_conectar(fuente)
+
+
+# ##########################################################################
 #  3. LA VENTANA
 # ##########################################################################
 
@@ -544,10 +634,13 @@ class TxCamara(object):
         tk.Button(top, text="Limpiar", command=self.limpiar).pack(side="left", padx=10)
         tk.Button(top, text="Deshacer (Ctrl+Z)", command=self.deshacer).pack(side="left")
 
-        # Botones de fotografía
+        # Botones de fotografía y cámara
         tk.Button(top, text="📷 Buscar foto", bg="#2a5298", fg="white",
                   font=("Segoe UI", 9, "bold"),
                   command=self.buscar_fotografia).pack(side="left", padx=(10, 2))
+        tk.Button(top, text="📱 Tomar foto con cámara", bg="#1b6ca8", fg="white",
+                  font=("Segoe UI", 9, "bold"),
+                  command=self.tomar_foto_camara).pack(side="left", padx=2)
         self.btn_diag = tk.Button(top, text="🔍 Ver diagnóstico",
                                   command=self.ver_diagnostico_foto)
         self.btn_diag.pack(side="left", padx=2)
@@ -745,12 +838,75 @@ class TxCamara(object):
         # Abrir inmediatamente el editor de diagnóstico lado a lado
         self.ver_diagnostico_foto()
 
+    def tomar_foto_camara(self):
+        """Abre el diálogo para seleccionar cámara o celular e iniciar visor en vivo."""
+        DialogoSelectorCamara(self.root, self._capturar_con_camara)
+
+    def _capturar_con_camara(self, fuente):
+        """Inicia el visor en vivo, detecta la hoja y al presionar ESPACIO captura la foto."""
+        self.lbl_est.config(
+            text="Abriendo visor en vivo (%s)... ESPACIO = capturar foto, Q = salir" % fuente,
+            fg=AMBAR)
+        self.root.update_idletasks()
+
+        try:
+            salida = LH.mirar_con_la_camara(fuente, devolver_debug=True)
+            if not salida or salida[0] is None:
+                self.lbl_est.config(
+                    text="Captura cancelada o no se detectó cuadrícula.", fg=AMBAR)
+                return
+            grid, nota, seguridad, debug, frame = salida
+        except Exception as error:
+            messagebox.showerror("Cámara en vivo", str(error))
+            self.lbl_est.config(text="Error con la cámara: %s" % error, fg=ROJO)
+            return
+
+        # Guardar copia de la foto capturada en la carpeta de fotos
+        carpeta_fotos = DIR_ACTUAL / "fotos"
+        carpeta_fotos.mkdir(parents=True, exist_ok=True)
+        ruta_guardada = carpeta_fotos / "captura_celular.jpg"
+        if frame is not None:
+            cv2.imwrite(str(ruta_guardada), frame)
+            self.ruta_fotografia = str(ruta_guardada)
+        else:
+            self.ruta_fotografia = "Cámara en vivo (%s)" % fuente
+
+        self.parar()
+        self.filas, self.cols = len(grid), len(grid[0])
+        self.grid = grid
+        self.confianzas = seguridad
+        self.debug_foto = debug
+        self.cur = [0, 0]
+        self.historial = []
+        self.modo = "editar"
+        self.btn_modo.config(text="TRANSMITIR (F5)", bg=CURSOR)
+        self._regenerar()
+        self.foco_cuadricula()
+
+        dudas = 0
+        if seguridad:
+            for f in range(self.filas):
+                for c in range(self.cols):
+                    if grid[f][c] not in (C.NEGRO, C.BLANCO) and seguridad[f][c] < LH.DUDA:
+                        dudas += 1
+
+        msg = "Matriz %dx%d capturada con cámara" % (self.filas, self.cols)
+        if dudas > 0:
+            msg += " · ⚠️ %d celdas dudosas marcadas con '?'" % dudas
+            self.lbl_est.config(text=msg, fg=AMBAR)
+        else:
+            self.lbl_est.config(text=msg, fg=VERDE)
+
+        # Abrir inmediatamente el Editor de Diagnóstico para comparar y editar lado a lado
+        if debug and debug[0] is not None:
+            self.ver_diagnostico_foto()
+
     def ver_diagnostico_foto(self):
         """Abre la ventana interactiva de diagnóstico lado a lado para comparar y editar."""
         if not self.debug_foto or not self.ruta_fotografia:
             messagebox.showinfo(
                 "Diagnóstico",
-                "Primero carga una foto usando el botón '📷 Buscar foto'.")
+                "Primero carga una foto usando '📷 Buscar foto' o '📱 Tomar foto con cámara'.")
             return
         derecha, cajas = self.debug_foto
         EditorDiagnostico(self.root, self, derecha, cajas,

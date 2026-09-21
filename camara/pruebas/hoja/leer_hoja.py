@@ -1080,7 +1080,7 @@ def graficar_lectura(grid, nota, conf=None, derecha=None, cajas=None,
         cv2.destroyWindow(nom_ventana)
 
 
-def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
+def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
     """Como leer_de_la_camara, pero ENSEÑANDO lo que ve la camara.
 
     Sin ver la imagen no se puede apuntar: el programa encuentra algo y quien
@@ -1090,10 +1090,15 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
     """
     if not hay_pantalla():
         print("(sin pantalla: se lee a ciegas)")
-        return leer_de_la_camara(fuente, cuadros)
+        res = leer_de_la_camara(fuente, cuadros)
+        if devolver_debug:
+            return res[0], res[1], res[2], (None, None), None
+        return res
 
     cap = abrir_camara(fuente)
     if not cap.isOpened():
+        if devolver_debug:
+            return None, "no se pudo abrir la camara", None, (None, None), None
         return None, "no se pudo abrir la camara", None
     plantillas = Plantillas()
     ventana = "Hoja - ESPACIO lee, Q sale"
@@ -1104,6 +1109,8 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
     lector = LectorDeFondo(plantillas, tamaño)
     votos, margenes, leidas, ultimo = {}, {}, 0, None
     forma_ultima, panel = None, None
+    ultimo_debug = (None, None)
+    ultimo_frame = None
     try:
         while True:
             ok, f = leer_cuadro(cap)
@@ -1119,6 +1126,8 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
                 conf, derecha, cajas = salida[2]
                 forma_ultima = (len(grid), len(grid[0]))
                 ultimo = (grid, conf)
+                ultimo_debug = (derecha, cajas)
+                ultimo_frame = f.copy()
                 panel = panel_de_lectura(derecha, cajas, grid, conf)
                 aviso = "%s  -  ESPACIO para leerla" % nota
                 color = (90, 200, 90)
@@ -1166,6 +1175,8 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
         cv2.destroyWindow(ventana)
 
     if not votos:
+        if devolver_debug:
+            return None, "no se leyo ninguna cuadricula", None, (None, None), None
         return None, "no se leyo ninguna cuadricula", None
     forma = max(set(k[0] for k in votos),
                 key=lambda fm: sum(sum(votos[k].values())
@@ -1192,7 +1203,10 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
             seg.append(0.0 if acuerdo < ACUERDO_MIN
                        else (float(np.median(suyos)) if suyos else 1.0))
         grid.append(fila); seguridad.append(seg)
-    return grid, "%d x %d  (%d lecturas)" % (filas, cols, leidas), seguridad
+    res_nota = "%d x %d  (%d lecturas)" % (filas, cols, leidas)
+    if devolver_debug:
+        return grid, res_nota, seguridad, ultimo_debug, ultimo_frame
+    return grid, res_nota, seguridad
 
 
 def main():
