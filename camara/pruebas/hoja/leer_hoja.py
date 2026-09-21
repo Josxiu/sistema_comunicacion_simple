@@ -84,6 +84,25 @@ HOLGURA_MARCO = 3.0
 # marca como dudosa. Ver el bucle de celdas de leer_hoja.
 COMPROBAR_ESTABILIDAD = True
 
+# A cuanto se endereza la hoja para medir la GEOMETRIA (marco, sesgo, celdas).
+# No es un numero libre: medio lector esta calibrado contra el -el largo de las
+# rayas, la ventana del umbral adaptativo, los topes de cuantas_celdas-, y
+# subirlo entero empeora. Medido sobre el banco de 27 fotos:
+#
+#     900 (este)  1665/1693  VERDE-MAL 0   forma mal 0
+#    1100         1598/1693  VERDE-MAL 1   forma mal 1
+#    1300         1624/1693  VERDE-MAL 4   forma mal 1
+#    1500         1557/1693  VERDE-MAL 26  forma mal 2
+#
+# O sea que con mas resolucion la GEOMETRIA se rompe. Pero las LETRAS mejoran,
+# y por eso van por separado: ver TOPE_LECTURA.
+LADO_HOJA = 900
+
+# Hasta cuanto se endereza una segunda vez, solo para MIRAR LAS LETRAS. La
+# geometria ya esta resuelta a LADO_HOJA y no se toca; esto solo cambia de que
+# imagen se recorta el trocito que se compara contra las plantillas.
+TOPE_LECTURA = 1600
+
 LADO_PLANTILLA = 32       # la letra normalizada, en pixeles
 LADO_CELDA = 64           # a cuanto se lleva cada celda al enderezar
 MARGEN_CELDA = 0.18       # cuanto se recorta por dentro para no coger la raya
@@ -243,7 +262,7 @@ def esquinas_de_la_tabla(marco):
                        pts[np.argmax(suma)], pts[np.argmax(resta)]])
 
 
-def enderezar(gris, esquinas, lado=900):
+def enderezar(gris, esquinas, lado=LADO_HOJA):
     """Homografia a un rectangulo, conservando mas o menos la proporcion."""
     a, b, c, d = esquinas
     ancho = (np.linalg.norm(b - a) + np.linalg.norm(c - d)) / 2
@@ -659,8 +678,13 @@ def tinta_permisiva(derecha, lado_celda):
     return b1
 
 
-def leer_celda(binaria, x0, x1, y0, y1, plantillas):
-    """Que hay en una celda: recuadro negro, vacia, o una letra."""
+def leer_celda(binaria, x0, x1, y0, y1, plantillas, alta=None, k=None):
+    """Que hay en una celda: recuadro negro, vacia, o una letra.
+
+    'alta' es la misma hoja enderezada MAS GRANDE, y 'k' su escala. Si viene,
+    la letra se compara sobre ella; lo de negro o vacia se sigue decidiendo
+    sobre la de siempre. Ver el comentario de la hoja de lectura en leer_hoja.
+    """
     m = MARGEN_CELDA
     dx, dy = (x1 - x0) * m, (y1 - y0) * m
     b = binaria[int(y0 + dy):int(y1 - dy), int(x0 + dx):int(x1 - dx)]
@@ -675,6 +699,15 @@ def leer_celda(binaria, x0, x1, y0, y1, plantillas):
         return NEGRO, 1.0
     if tinta <= TINTA_VACIA:
         return BLANCO, 1.0
+    # Para la LETRA, si hay hoja grande, se recorta de ella: son los mismos
+    # limites de celda multiplicados por la escala. Lo de arriba -negro, vacia-
+    # ya se decidio con la hoja de siempre y no cambia.
+    if alta is not None:
+        kx, ky = k
+        ba = alta[int((y0 + dy) * ky):int((y1 - dy) * ky),
+                  int((x0 + dx) * kx):int((x1 - dx) * kx)]
+        if ba.size >= b.size:
+            b = ba
     v = normalizar(b.astype(np.float32))
     if v is None:
         return BLANCO, 1.0
@@ -734,6 +767,45 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
     binaria = tinta_de_la_hoja(derecha, lado)
     permisiva = tinta_permisiva(derecha, lado) if estabilidad else None
 
+    # SEGUNDA HOJA, SOLO PARA LAS LETRAS, y solo cuando la celda se ha quedado
+    # sin pixeles. Enderezar a LADO_HOJA tira resolucion cuando la tabla es muy
+    # alargada: la hoja de 4x20 mide 1250x255 en la foto y se endereza a
+    # 900x183, o sea celdas de 45 px en vez de 62. Con MARGEN_CELDA dentro
+    # quedan 29 px para una letra que se compara a 32x32: ya no hay con que
+    # distinguir una E de una F, y ahi salian 21 de los 28 fallos del banco.
+    #
+    # Subir LADO_HOJA para todo no sirve, rompe la geometria (ver su comentario).
+    # Lo que si se puede es enderezar OTRA VEZ, mas grande, y usar esa copia
+    # nada mas para recortar la letra: las celdas ya estan localizadas y solo
+    # hay que multiplicarlas por la escala.
+    #
+    # Se pide que la celda sea chica de verdad -menos del doble de la plantilla-
+    # y no solo que sobre resolucion. Hacerlo siempre que sobrara empeoraba
+    # TRAMANDA, que tiene celdas de 100 px y no lo necesita: 72/72 pasaba a
+    # 71/72. Con el tope puesto, 24 de las 27 fotos salen identicas y las que
+    # cambian son las de la hoja de 4x20, que es la que sufria.
+    alta = k = alta_perm = None
+    a, b1, c1, d1 = esquinas
+    natural = max((np.linalg.norm(b1 - a) + np.linalg.norm(c1 - d1)) / 2,
+                  (np.linalg.norm(d1 - a) + np.linalg.norm(c1 - b1)) / 2)
+    if (lado * (1.0 - 2.0 * MARGEN_CELDA) < 2 * LADO_PLANTILLA
+            and natural > LADO_HOJA * 1.05):
+        grande = quitar_marco(afinar(enderezar(
+            img, esquinas, lado=int(min(TOPE_LECTURA, natural)))))
+        kx = grande.shape[1] / float(derecha.shape[1])
+        ky = grande.shape[0] / float(derecha.shape[0])
+        # afinar y quitar_marco se miden otra vez sobre la hoja grande, asi que
+        # podrian no cuadrar. Si las dos escalas no coinciden es que no cuadran,
+        # y entonces no se usa: las cajas caerian corridas.
+        if abs(kx - ky) < 0.02 * kx:
+            lado_g = lado * (kx + ky) / 2.0
+            alta, k = tinta_de_la_hoja(grande, lado_g), (kx, ky)
+            # La comprobacion de estabilidad tiene que mirar la MISMA imagen
+            # con otro umbral. Si una mirara la hoja grande y la otra la chica,
+            # lo que se estaria comprobando es el cambio de tamaño, no el de
+            # umbral, y marcaba dudosas de mas.
+            alta_perm = tinta_permisiva(grande, lado_g) if estabilidad else None
+
     plantillas = plantillas or Plantillas()
     grid, confianzas = [], []
     for f in range(filas):
@@ -743,7 +815,7 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
             if caja is None:
                 fila.append(BLANCO); conf.append(0.0); continue
             x0, y0, x1, y1 = caja
-            v, m = leer_celda(binaria, x0, x1, y0, y1, plantillas)
+            v, m = leer_celda(binaria, x0, x1, y0, y1, plantillas, alta, k)
             # Una lectura solo se da por buena si AGUANTA un umbral algo mas
             # permisivo. Cuando una letra pierde un trazo por quedar justo
             # encima del corte, lo que queda suele ser OTRA letra perfectamente
@@ -753,7 +825,8 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
             # volver a mirar con el corte mas alto y ver aparecer la barra.
             # No cambia la letra, solo la confianza: no puede leer peor.
             if permisiva is not None and v != NEGRO:
-                v2, _ = leer_celda(permisiva, x0, x1, y0, y1, plantillas)
+                v2, _ = leer_celda(permisiva, x0, x1, y0, y1, plantillas,
+                                   alta_perm, k)
                 if v2 != v:
                     m = 0.0
             fila.append(v); conf.append(m)
