@@ -20,17 +20,27 @@ DESDE UNA FOTO DE LA HOJA
 La matriz tambien se carga de una foto, que es mucho mas rapido y se equivoca
 menos que digitar 80 celdas a mano con el reloj corriendo.
 
-    Buscar foto      se escoge la foto, se encuadra si hace falta, y sale la
-                     matriz. Medido contra 27 fotos del telefono de 8 hojas
-                     distintas: 1671 de 1693 celdas bien, y las 22 que fallan
-                     salen TODAS marcadas con ?. Ninguna se da por buena
-                     estando mal, que es el unico error que no se veria.
-    Con la camara    lo mismo pero en vivo, apuntando el telefono (DroidCam
-                     suele ser la camara 1). ESPACIO junta una lectura con las
-                     anteriores y gana lo que mas se repita; Q sale.
+    Buscar foto      se escoge la foto y se abre el encuadre, con la tabla YA
+                     marcada: normalmente basta con darle a Enter. Medido
+                     contra 27 fotos del telefono de 8 hojas distintas: 1671 de
+                     1693 celdas bien, y las 22 que fallan salen TODAS marcadas
+                     con ?. Ninguna se da por buena estando mal, que es el
+                     unico error que no se veria.
+    Con la camara    lo mismo pero en vivo. La camara se escoge en el
+                     desplegable de al lado y el ↻ vuelve a buscarlas, que
+                     DroidCam aparece y desaparece al enchufar el telefono.
+                     ESPACIO junta una lectura con las anteriores y al final
+                     gana, celda por celda, lo que mas se haya repetido; Q
+                     sale. Cada ESPACIO cuenta UNA lectura nueva: tenerlo
+                     pulsado no sirve para juntar mas rapido.
+                     En vivo la tabla se recorta sola y se marca en naranja,
+                     porque la camara entrega en horizontal y la hoja sale
+                     pequeña en medio.
     Ver diagnostico  la hoja enderezada al lado de la matriz leida, para
                      comparar celda por celda y corregir a mano. Es lo que hay
                      que mirar cuando algo no cuadra.
+    Ctrl+R           volver a encuadrar la ultima foto, desde la ventana
+                     principal o desde el diagnostico.
 
 El ? rojo marca una celda que el lector no las tiene todas consigo. Escribir
 encima de ella la da por revisada. Al transmitir se pregunta si quedan ?, y
@@ -82,6 +92,7 @@ Redes de Computadores I - UdeA 2026-2 - Proyecto 01
 """
 
 import sys
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -371,6 +382,11 @@ class EditorDiagnostico(tk.Toplevel):
         self._construir()
         self.bind("<Key>", self._on_key)
         self.bind("<Control-z>", lambda e: self.deshacer())
+        # Ctrl+R tambien aqui: esta ventana es la que se mira para decidir si
+        # hay que volver a encuadrar, y el atajo de la principal no llega a
+        # ella por ser otra ventana con su propio foco.
+        self.bind("<Control-r>", lambda e: self._reencuadrar())
+        self.bind("<Control-R>", lambda e: self._reencuadrar())
         self.bind("<Escape>", lambda e: self.destroy())
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.after(50, self.redibujar)
@@ -831,10 +847,37 @@ class VentanaRecorte(tk.Toplevel):
         self._disp_h = 100
         self._img_tk = None
 
+        # La tabla se busca sola y se deja YA SELECCIONADA, asi que lo normal
+        # es abrir y darle a Enter. No se recorta por las bravas a proposito:
+        # sobre el banco, recortando siempre aparecian dos celdas mal leidas y
+        # dadas por buenas, y el margen del recorte resulto puntiagudo (0,14
+        # daba treinta y cuatro). Sugerirlo y que lo confirme una persona da lo
+        # bueno de las dos cosas: rapido, pero con alguien mirando.
+        self.sel_rect = self._sugerir_recorte()
+        self.sugerido = self.sel_rect is not None
+
         self._construir()
         self.bind("<Escape>", lambda e: self.destroy())
         self.bind("<Return>", lambda e: self._aplicar())
         self.after(60, self._cargar_imagen)
+
+    def _sugerir_recorte(self):
+        """Donde cree leer_hoja que esta la tabla, o None."""
+        if LH is None:
+            return None
+        try:
+            caja = LH.buscar_la_tabla(self.imagen_actual)
+        except Exception:
+            return None
+        if caja is None:
+            return None
+        x0, y0, x1, y1 = caja
+        H, W = self.imagen_actual.shape[:2]
+        # Si lo que propone es casi la foto entera, no vale la pena proponerlo:
+        # mejor dejarlo sin seleccion y que se vea que no hace falta recortar.
+        if (x1 - x0) * (y1 - y0) > 0.85 * W * H:
+            return None
+        return (x0, y0, x1, y1)
 
     def _construir(self):
         top = tk.Frame(self, bg=PANEL)
@@ -911,6 +954,7 @@ class VentanaRecorte(tk.Toplevel):
         else:
             self.lbl_dims.config(
                 text="Arrastra con el ratón sobre la foto para recortar la matriz si lo deseas, o pulsa Enter para continuar completa.")
+            self.sugerido = False
 
     def _quitar_recorte(self):
         self.sel_rect = None
@@ -955,6 +999,7 @@ class VentanaRecorte(tk.Toplevel):
             ix1 = max(ix0 + 20, min(W, int(ix1)))
             iy1 = max(iy0 + 20, min(H, int(iy1)))
             self.sel_rect = (ix0, iy0, ix1, iy1)
+            self.sugerido = False
 
         self.start_x, self.start_y = None, None
         self._dibujar_seleccion()
@@ -978,17 +1023,27 @@ class VentanaRecorte(tk.Toplevel):
                                     fill="#2f7de1", outline="white", tags="sel_box")
 
         w_px, h_px = int(ix1 - ix0), int(iy1 - iy0)
-        self.lbl_dims.config(
-            text="Recorte seleccionado: %d × %d píxeles  (Enter para aplicar, o 'Foto completa' para quitar)" % (w_px, h_px))
+        if getattr(self, "sugerido", False):
+            self.lbl_dims.config(
+                text="Aquí cree el programa que está la matriz (%d × %d px)  ·  "
+                     "Enter para aceptar, arrastra para cambiarlo, o "
+                     "'Foto completa'" % (w_px, h_px))
+        else:
+            self.lbl_dims.config(
+                text="Recorte seleccionado: %d × %d píxeles  (Enter para aplicar, o 'Foto completa' para quitar)" % (w_px, h_px))
 
     def _girar_90(self):
         self.imagen_actual = cv2.rotate(self.imagen_actual, cv2.ROTATE_90_CLOCKWISE)
-        self.sel_rect = None
+        # la sugerencia se rehace sobre la imagen girada, que la de antes ya no
+        # cae donde estaba
+        self.sel_rect = self._sugerir_recorte()
+        self.sugerido = self.sel_rect is not None
         self._cargar_imagen()
 
     def _restablecer(self):
         self.imagen_actual = self.imagen_original.copy()
-        self.sel_rect = None
+        self.sel_rect = self._sugerir_recorte()
+        self.sugerido = self.sel_rect is not None
         self._cargar_imagen()
 
     def _aplicar(self):
@@ -1037,6 +1092,8 @@ class TxCamara(object):
         self.imagen_original = None     # la foto tal cual, para re-recortarla
         self.ruta_fotografia = None
         self._motivo_sin_lector = ""    # por que no se puede leer de foto
+        self._camaras = []              # las que encontro la ultima busqueda
+        self._camaras_nuevas = None     # recado del hilo que las busca
 
         self.modo = "editar"
         self.simbolos = []
@@ -1106,13 +1163,37 @@ class TxCamara(object):
                                     fg="white", font=("Segoe UI", 9, "bold"),
                                     command=self.tomar_foto_camara)
         self.btn_camara.pack(side="left", padx=2)
+
+        # La camara se escoge AQUI, en la barra, y no en un dialogo aparte: el
+        # dia de la prueba son dos clics menos y se ve de un vistazo con cual
+        # va a tirar. El dialogo sigue existiendo para el caso de la URL.
+        self.cbo_camara = ttk.Combobox(top, width=22, state="readonly",
+                                       values=["(buscando cámaras...)"])
+        self.cbo_camara.current(0)
+        self.cbo_camara.pack(side="left", padx=(6, 0))
+        self.cbo_camara.bind("<<ComboboxSelected>>",
+                             lambda e: self.foco_cuadricula())
+        # El ↻ hace falta de verdad: DroidCam aparece y desaparece al enchufar
+        # o desenchufar el telefono, y sin esto habria que reiniciar el
+        # programa para que se entere.
+        self.btn_refrescar = tk.Button(top, text="↻", width=2,
+                                       command=self.buscar_camaras)
+        self.btn_refrescar.pack(side="left", padx=(2, 0))
+
         self.btn_diag = tk.Button(top, text="🔍 Ver diagnóstico",
                                   command=self.ver_diagnostico_foto)
-        self.btn_diag.pack(side="left", padx=2)
+        self.btn_diag.pack(side="left", padx=(8, 2))
         if not puede:
-            for b in (self.btn_foto, self.btn_camara, self.btn_diag):
+            for b in (self.btn_foto, self.btn_camara, self.btn_diag,
+                      self.btn_refrescar):
                 b.config(state="disabled")
+            self.cbo_camara.config(state="disabled")
             self._motivo_sin_lector = motivo
+        else:
+            # Buscar camaras abre cada una para ver que resolucion da, y eso
+            # tarda un par de segundos. En otro hilo, que si no la ventana
+            # tarda en aparecer y parece que el programa se colgo al abrir.
+            self.buscar_camaras(callado=True)
 
         self.lbl_celdas = tk.Label(top, text="", bg=FONDO, fg="#888888",
                                    font=("Segoe UI", 9))
@@ -1245,6 +1326,10 @@ class TxCamara(object):
         # ESC para: si esta emitiendo, PARAR; si no, devolver el teclado
         self.root.bind("<Escape>", self._escape)
         self.root.bind("<Control-z>", lambda e: self.deshacer())
+        # Ctrl+R para volver a encuadrar: es lo que mas se repite cuando una
+        # foto no sale a la primera, y buscar el boton cada vez cansa.
+        self.root.bind("<Control-r>", lambda e: self.recortar_fotografia())
+        self.root.bind("<Control-R>", lambda e: self.recortar_fotografia())
         self.root.bind("<Configure>", lambda e: self.dibujar_grid())
         self.root.protocol("WM_DELETE_WINDOW", self.cerrar)
         self._bucle()
@@ -1280,9 +1365,79 @@ class TxCamara(object):
         VentanaRecorte(self.root, self.imagen_original, self._aplicar_recorte,
                        titulo=Path(ruta).name)
 
+    OPCION_URL = "Otra / por URL (celular por Wi-Fi)..."
+
+    def buscar_camaras(self, callado=False):
+        """Rellena el desplegable con las camaras que haya AHORA.
+
+        Va en otro hilo porque abrir cada camara para preguntarle la
+        resolucion tarda un par de segundos, y hacerlo en el hilo de la
+        ventana la deja congelada: al arrancar parecia que el programa se
+        habia colgado.
+        """
+        if LH is None:
+            return
+        self.cbo_camara.config(values=["(buscando cámaras...)"])
+        self.cbo_camara.current(0)
+        if not callado:
+            self.lbl_est.config(text="Buscando cámaras...", fg=AMBAR)
+
+        def trabajo():
+            try:
+                encontradas = detectar_camaras_disponibles()
+            except Exception:
+                encontradas = []
+            # A Tkinter NO se le habla desde otro hilo, y eso incluye
+            # root.after(): registrar la llamada toca las estructuras de Tk y
+            # revienta con "main thread is not in main loop". Lo que se hace
+            # es dejar el resultado en una variable y que lo recoja _bucle(),
+            # que ya corre en el hilo de la ventana cada 100 ms.
+            self._camaras_nuevas = (encontradas, callado)
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _pintar_camaras(self, encontradas, callado=False):
+        if not self.cbo_camara.winfo_exists():
+            return
+        self._camaras = encontradas
+        etiquetas = [e for _, e in encontradas] + [self.OPCION_URL]
+        self.cbo_camara.config(values=etiquetas)
+        # DroidCam es la que se usa con el telefono, asi que si esta se escoge
+        # sola; si no, la primera que haya.
+        cual = 0
+        for i, (_, e) in enumerate(encontradas):
+            if "droidcam" in e.lower():
+                cual = i
+                break
+        self.cbo_camara.current(cual if etiquetas else 0)
+        if not callado:
+            n = len(encontradas)
+            self.lbl_est.config(
+                text="%d cámara%s encontrada%s" % (n, "" if n == 1 else "s",
+                                                   "" if n == 1 else "s"),
+                fg=VERDE if n else AMBAR)
+
+    def camara_elegida(self):
+        """El indice (o la URL) de la camara del desplegable, o None."""
+        etiqueta = self.cbo_camara.get()
+        if etiqueta == self.OPCION_URL or not getattr(self, "_camaras", None):
+            return None
+        for fuente, e in self._camaras:
+            if e == etiqueta:
+                return fuente
+        return None
+
     def tomar_foto_camara(self):
-        """Abre el diálogo para seleccionar cámara o celular e iniciar visor en vivo."""
-        DialogoSelectorCamara(self.root, self._capturar_con_camara)
+        """Abre el visor en vivo con la camara del desplegable.
+
+        Si la escogida es la de la URL -o si todavia no se ha buscado ninguna-
+        se abre el dialogo de siempre, que es donde se escribe la direccion.
+        """
+        fuente = self.camara_elegida()
+        if fuente is None:
+            DialogoSelectorCamara(self.root, self._capturar_con_camara)
+            return
+        self._capturar_con_camara(fuente)
 
     def _capturar_con_camara(self, fuente):
         """Abre el visor en vivo con la rejilla y lectura en tiempo real."""
@@ -2123,6 +2278,10 @@ class TxCamara(object):
     def _bucle(self):
         if self.t0 is not None:
             self.lbl_t.config(text="%04.1f s" % (time.time() - self.t0))
+        # el recado que deja el hilo que busca camaras (ver buscar_camaras)
+        pendiente, self._camaras_nuevas = self._camaras_nuevas, None
+        if pendiente is not None:
+            self._pintar_camaras(pendiente[0], pendiente[1])
         self.root.after(100, self._bucle)
 
     def cerrar(self):
