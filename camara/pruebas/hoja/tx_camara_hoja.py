@@ -23,6 +23,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
+from PIL import Image, ImageTk
 
 # Rutas relativas para importar rx_camara (en camara/) y leer_hoja (en esta misma carpeta)
 DIR_ACTUAL = Path(__file__).resolve().parent
@@ -144,6 +145,339 @@ def simbolos_del_bloque(grid):
 def patron_aviso():
     return [C.AMBAS if i % 2 == 0 else C.APAGADO
             for i in range(AVISO_DESTELLOS * 2)]
+
+
+# ##########################################################################
+#  2.5 EDITOR DE DIAGNÓSTICO INTERACTIVO (FOTO LADO A LADO)
+# ##########################################################################
+
+class EditorDiagnostico(tk.Toplevel):
+    """Ventana interactiva de diagnóstico lado a lado.
+
+    Muestra:
+      - A la izquierda: la fotografía rectificada con la rejilla detectada.
+      - A la derecha: la matriz digital decodificada.
+
+    Permite hacer clic sobre cualquier celda (sea en la foto o en la matriz)
+    y editarla inmediatamente con el teclado, actualizando ambas vistas y la
+    ventana principal del transmisor en tiempo real.
+    """
+
+    def __init__(self, master, tx, derecha, cajas, titulo="Diagnóstico"):
+        super().__init__(master)
+        self.tx = tx
+        self.derecha = derecha
+        self.cajas = cajas
+        self.titulo = titulo
+        self.cur = list(tx.cur) if tx.cur else [0, 0]
+        self.historial = []
+        self._foto_tk = None
+        self._escala_foto = 1.0
+        self._lado_matriz = 35
+        self._geom_matriz = (10, 10)
+
+        self.title("Diagnóstico y Edición · Foto vs Matriz")
+        self.configure(bg=FONDO)
+        self.geometry("1100x720")
+        self.minsize(800, 500)
+
+        self._construir()
+        self.bind("<Key>", self._on_key)
+        self.bind("<Control-z>", lambda e: self.deshacer())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.after(50, self.redibujar)
+
+    def _construir(self):
+        # 1. Barra superior: info y botones
+        top = tk.Frame(self, bg=PANEL)
+        top.pack(fill="x", padx=10, pady=8)
+
+        lbl_tit = tk.Label(top, text=self.titulo, bg=PANEL, fg=AZUL,
+                           font=("Segoe UI", 12, "bold"))
+        lbl_tit.pack(side="left")
+
+        q = LH._calidad(self.tx.grid, self.tx.confianzas)
+        if q >= LH.CALIDAD_FIRME:
+            txt_q, col_q = "Lectura Firme (calidad %.3f)" % q, VERDE
+        elif q > 0:
+            txt_q, col_q = "Lectura Dudosa (calidad %.3f · revisar ?)" % q, AMBAR
+        else:
+            txt_q, col_q = "Calidad N/D", "#aaaaaa"
+
+        self.lbl_q = tk.Label(top, text="  ·  " + txt_q, bg=PANEL, fg=col_q,
+                              font=("Segoe UI", 10, "bold"))
+        self.lbl_q.pack(side="left", padx=4)
+
+        tk.Button(top, text="✓ Listo / Cerrar (Esc)", bg=CURSOR, fg="white",
+                  font=("Segoe UI", 9, "bold"),
+                  command=self.destroy).pack(side="right", padx=4)
+        tk.Button(top, text="Deshacer (Ctrl+Z)", bg="#333333", fg="white",
+                  font=("Segoe UI", 9),
+                  command=self.deshacer).pack(side="right", padx=6)
+
+        # Barra de estado de celda activa
+        barra_info = tk.Frame(self, bg=FONDO)
+        barra_info.pack(fill="x", padx=12, pady=(2, 4))
+        self.lbl_activa = tk.Label(barra_info, text="", bg=FONDO, fg=AMBAR,
+                                   font=("Consolas", 11, "bold"), anchor="w")
+        self.lbl_activa.pack(side="left")
+
+        # 2. Área central: Paneles lado a lado
+        cuerpo = tk.Frame(self, bg=FONDO)
+        cuerpo.pack(fill="both", expand=True, padx=10, pady=4)
+
+        # Lado izquierdo: Foto
+        marco_foto = tk.Frame(cuerpo, bg=PANEL, bd=1, relief="ridge")
+        marco_foto.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        tk.Label(marco_foto, text="📷 Fotografía (clic en cualquier casilla para seleccionarla)",
+                 bg=PANEL, fg="#cccccc", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=6, pady=4)
+        self.cv_foto = tk.Canvas(marco_foto, bg=NEGRO, highlightthickness=0)
+        self.cv_foto.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.cv_foto.bind("<Button-1>", self._click_foto)
+        self.cv_foto.bind("<Configure>", lambda e: self.redibujar())
+
+        # Lado derecho: Matriz digital
+        marco_matriz = tk.Frame(cuerpo, bg=PANEL, bd=1, relief="ridge")
+        marco_matriz.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        tk.Label(marco_matriz, text="🔲 Matriz decodificada (clic o digita para corregir)",
+                 bg=PANEL, fg="#cccccc", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=6, pady=4)
+        self.cv_matriz = tk.Canvas(marco_matriz, bg=FONDO, highlightthickness=0)
+        self.cv_matriz.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.cv_matriz.bind("<Button-1>", self._click_matriz)
+        self.cv_matriz.bind("<Configure>", lambda e: self.redibujar())
+
+        # 3. Pie de atajos y ayuda
+        pie = tk.Frame(self, bg=FONDO)
+        pie.pack(fill="x", padx=10, pady=(2, 8))
+        ayuda = ("💡 Clic en la foto o en la matriz para seleccionar casilla  ·  "
+                 "Teclas: Letras A..Z, Ñ  |  . o # o espacio = negro  |  _ o - = blanco  |  "
+                 "Flechas = mover  |  Ctrl+Z = deshacer")
+        tk.Label(pie, text=ayuda, bg=FONDO, fg="#888888",
+                 font=("Segoe UI", 9)).pack(side="left")
+
+    def _click_foto(self, ev):
+        if not hasattr(self, "_escala_foto") or self._escala_foto <= 0:
+            return
+        img_x = ev.x / self._escala_foto
+        img_y = ev.y / self._escala_foto
+
+        mejor_dist = float("inf")
+        mejor_celda = None
+        for (f, c), (x0, y0, x1, y1) in self.cajas.items():
+            if x0 <= img_x <= x1 and y0 <= img_y <= y1:
+                mejor_celda = [f, c]
+                break
+            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            d = (img_x - cx) ** 2 + (img_y - cy) ** 2
+            if d < mejor_dist:
+                mejor_dist = d
+                mejor_celda = [f, c]
+
+        if mejor_celda is not None:
+            self.cur = mejor_celda
+            self.tx.cur = list(self.cur)
+            self.redibujar()
+
+    def _click_matriz(self, ev):
+        if not hasattr(self, "_lado_matriz") or self._lado_matriz <= 0:
+            return
+        x0, y0 = getattr(self, "_geom_matriz", (0, 0))
+        c = int((ev.x - x0) // self._lado_matriz)
+        f = int((ev.y - y0) // self._lado_matriz)
+        if 0 <= f < self.tx.filas and 0 <= c < self.tx.cols:
+            self.cur = [f, c]
+            self.tx.cur = list(self.cur)
+            self.redibujar()
+
+    def _on_key(self, ev):
+        k, ch = ev.keysym, ev.char
+        if k in ("Left", "Right", "Up", "Down"):
+            di, dj = {"Left": (0, -1), "Right": (0, 1),
+                      "Up": (-1, 0), "Down": (1, 0)}[k]
+            f = max(0, min(self.tx.filas - 1, self.cur[0] + di))
+            c = max(0, min(self.tx.cols - 1, self.cur[1] + dj))
+            self.cur = [f, c]
+            self.tx.cur = list(self.cur)
+            self.redibujar()
+            return
+        if k == "Return":
+            self.cur = [min(self.cur[0] + 1, self.tx.filas - 1), 0]
+            self.tx.cur = list(self.cur)
+            self.redibujar()
+            return
+
+        if k == "BackSpace":
+            self._guardar_undo()
+            self._mover_retroceso()
+            self.tx.grid[self.cur[0]][self.cur[1]] = C.NEGRO
+            self._limpiar_duda(self.cur[0], self.cur[1])
+        elif ch in (".", " ", "#"):
+            self._guardar_undo()
+            self.tx.grid[self.cur[0]][self.cur[1]] = C.NEGRO
+            self._limpiar_duda(self.cur[0], self.cur[1])
+            self._mover_avance()
+        elif ch in ("-", "_"):
+            self._guardar_undo()
+            self.tx.grid[self.cur[0]][self.cur[1]] = C.BLANCO
+            self._limpiar_duda(self.cur[0], self.cur[1])
+            self._mover_avance()
+        elif ch and ch.upper() in C.ALFABETO:
+            self._guardar_undo()
+            self.tx.grid[self.cur[0]][self.cur[1]] = ch.upper()
+            self._limpiar_duda(self.cur[0], self.cur[1])
+            self._mover_avance()
+        else:
+            return
+
+        self.tx._regenerar()
+        self.redibujar()
+
+    def _limpiar_duda(self, f, c):
+        if self.tx.confianzas and f < len(self.tx.confianzas) and c < len(self.tx.confianzas[f]):
+            self.tx.confianzas[f][c] = 1.0
+
+    def _mover_avance(self):
+        f, c = self.cur
+        c += 1
+        if c >= self.tx.cols:
+            c = 0
+            f += 1
+        if f >= self.tx.filas:
+            f = self.tx.filas - 1
+            c = self.tx.cols - 1
+        self.cur = [f, c]
+        self.tx.cur = list(self.cur)
+
+    def _mover_retroceso(self):
+        f, c = self.cur
+        c -= 1
+        if c < 0:
+            c = self.tx.cols - 1
+            f -= 1
+        if f < 0:
+            f = 0
+            c = 0
+        self.cur = [f, c]
+        self.tx.cur = list(self.cur)
+
+    def _guardar_undo(self):
+        self.historial.append(([f[:] for f in self.tx.grid],
+                               [fc[:] for fc in self.tx.confianzas] if self.tx.confianzas else None,
+                               list(self.cur)))
+        if len(self.historial) > 50:
+            self.historial.pop(0)
+
+    def deshacer(self):
+        if not self.historial:
+            return
+        g, cnf, cur = self.historial.pop()
+        self.tx.grid = g
+        self.tx.confianzas = cnf
+        self.cur = cur
+        self.tx.cur = list(cur)
+        self.tx._regenerar()
+        self.redibujar()
+
+    def redibujar(self):
+        if not self.winfo_exists():
+            return
+
+        f_act, c_act = self.cur
+        val_act = (self.tx.grid[f_act][c_act]
+                   if f_act < len(self.tx.grid) and c_act < len(self.tx.grid[0])
+                   else "?")
+        duda_act = False
+        if (self.tx.confianzas and f_act < len(self.tx.confianzas)
+                and c_act < len(self.tx.confianzas[f_act])):
+            if (val_act not in (C.NEGRO, C.BLANCO)
+                    and self.tx.confianzas[f_act][c_act] < LH.DUDA):
+                duda_act = True
+
+        info_txt = "Celda seleccionada: [Fila %d, Col %d]  ·  Valor: '%s'  [%s]" % (
+            f_act + 1, c_act + 1, val_act, "⚠️ DUDOSA (?)" if duda_act else "✓ SEGURA"
+        )
+        self.lbl_activa.config(text=info_txt, fg=AMBAR if duda_act else VERDE)
+
+        # 1. Dibujar Foto con recuadro
+        h_disponible = max(350, self.cv_foto.winfo_height())
+        w_disponible = max(300, self.cv_foto.winfo_width())
+
+        factor = min(h_disponible / float(self.derecha.shape[0]),
+                     w_disponible / float(self.derecha.shape[1]), 1.2)
+        ancho_foto = max(40, int(self.derecha.shape[1] * factor))
+        alto_foto = max(40, int(self.derecha.shape[0] * factor))
+        self._escala_foto = factor
+
+        foto_bgr = LH.panel_de_lectura(
+            self.derecha, self.cajas, self.tx.grid, self.tx.confianzas)
+        foto_res = cv2.resize(foto_bgr, (ancho_foto, alto_foto),
+                              interpolation=cv2.INTER_AREA)
+        foto_rgb = cv2.cvtColor(foto_res, cv2.COLOR_BGR2RGB)
+        self._foto_tk = ImageTk.PhotoImage(Image.fromarray(foto_rgb))
+
+        self.cv_foto.delete("all")
+        self.cv_foto.create_image(0, 0, anchor="nw", image=self._foto_tk)
+
+        # Resaltar la celda activa sobre la foto
+        caja = self.cajas.get((f_act, c_act))
+        if caja:
+            bx0, by0, bx1, by1 = caja
+            self.cv_foto.create_rectangle(
+                bx0 * factor, by0 * factor, bx1 * factor, by1 * factor,
+                outline=AMBAR, width=3
+            )
+
+        # 2. Dibujar Matriz Digital
+        filas, cols = self.tx.filas, self.tx.cols
+        h_mat_disp = max(350, self.cv_matriz.winfo_height())
+        w_mat_disp = max(250, self.cv_matriz.winfo_width())
+
+        lado = max(20, min((h_mat_disp - 30) // filas,
+                           (w_mat_disp - 30) // cols, 60))
+        self._lado_matriz = lado
+        ancho_mat = cols * lado
+        alto_mat = filas * lado
+
+        mx0 = max(10, (w_mat_disp - ancho_mat) // 2)
+        my0 = max(10, (h_mat_disp - alto_mat) // 2)
+        self._geom_matriz = (mx0, my0)
+
+        self.cv_matriz.delete("all")
+
+        for f in range(filas):
+            for c in range(cols):
+                v = self.tx.grid[f][c]
+                x = mx0 + c * lado
+                y = my0 + f * lado
+                es_dudosa = False
+                if (self.tx.confianzas and f < len(self.tx.confianzas)
+                        and c < len(self.tx.confianzas[f])):
+                    if (v not in (C.NEGRO, C.BLANCO)
+                            and self.tx.confianzas[f][c] < LH.DUDA):
+                        es_dudosa = True
+
+                color_fondo = NEGRO if v == C.NEGRO else (BLANCO if not es_dudosa else "#ffe0b2")
+                self.cv_matriz.create_rectangle(x, y, x + lado, y + lado,
+                                                fill=color_fondo, outline=BORDE)
+
+                if v not in (C.NEGRO, C.BLANCO):
+                    self.cv_matriz.create_text(
+                        x + lado / 2, y + lado / 2, text=v, fill="#000000",
+                        font=("Segoe UI", int(lado * 0.55), "bold")
+                    )
+
+                if es_dudosa:
+                    self.cv_matriz.create_text(
+                        x + lado - 7, y + 8, text="?", fill=ROJO,
+                        font=("Segoe UI", max(8, int(lado * 0.28)), "bold")
+                    )
+
+                # Cursor activo
+                if f == f_act and c == c_act:
+                    self.cv_matriz.create_rectangle(
+                        x, y, x + lado, y + lado, outline=AMBAR, width=3
+                    )
 
 
 # ##########################################################################
@@ -408,17 +742,19 @@ class TxCamara(object):
         else:
             self.lbl_est.config(text=msg, fg=VERDE)
 
+        # Abrir inmediatamente el editor de diagnóstico lado a lado
+        self.ver_diagnostico_foto()
+
     def ver_diagnostico_foto(self):
-        """Abre la ventana gráfica comparativa de leer_hoja si hay foto cargada."""
+        """Abre la ventana interactiva de diagnóstico lado a lado para comparar y editar."""
         if not self.debug_foto or not self.ruta_fotografia:
             messagebox.showinfo(
                 "Diagnóstico",
                 "Primero carga una foto usando el botón '📷 Buscar foto'.")
             return
         derecha, cajas = self.debug_foto
-        nota = "%d x %d" % (self.filas, self.cols)
-        LH.graficar_lectura(self.grid, nota, self.confianzas, derecha, cajas,
-                            titulo=Path(self.ruta_fotografia).name, esperar=False)
+        EditorDiagnostico(self.root, self, derecha, cajas,
+                          titulo=Path(self.ruta_fotografia).name)
 
     # --------------------------------------------------------- cuadricula --
     def cambiar_tamano(self, que, delta):
