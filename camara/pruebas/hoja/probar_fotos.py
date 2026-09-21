@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """Banco de pruebas: el lector contra fotos REALES, con la verdad escrita a mano.
 
-    python probar_fotos.py            mide leer_hoja.py de esta carpeta
+    python probar_fotos.py            mide camara/leer_hoja.py, el de verdad
     python probar_fotos.py otro.py    mide otra version, para comparar
+
+El lector vive en camara/, al lado de rx_camara.py y del transmisor que lo
+usa; aqui solo esta el banco que lo mide.
 
 Lo que se mide, en este orden de importancia:
 
@@ -29,6 +32,7 @@ import cv2
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 FOTOS = os.path.join(AQUI, "fotos")
+LECTOR = os.path.join(AQUI, "..", "..", "leer_hoja.py")
 
 H = {
     "TRAMANDA": ["###_T#M#", "#BITRÑEO", "#_##A#NN", "#__#M#SD",
@@ -139,4 +143,4 @@ def medir(LH, verbose=True):
 
 if __name__ == "__main__":
     medir(cargar(sys.argv[1] if len(sys.argv) > 1
-                 else os.path.join(AQUI, "leer_hoja.py")))
+                 else LECTOR))

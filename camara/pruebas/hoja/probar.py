@@ -2,7 +2,7 @@
 """Cuanto acierta el lector sobre las hojas generadas."""
 import json, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # camara/
 from leer_hoja import leer_hoja, Plantillas
 
 carpeta = Path(sys.argv[1] if len(sys.argv) > 1 else "hojas")

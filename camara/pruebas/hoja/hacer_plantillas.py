@@ -6,11 +6,15 @@ pero el lector no: el lector solo abre el .npz.
 
 Las fuentes de aqui NO son las de las hojas de prueba.
 """
+import os
 import sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-sys.path.insert(0, ".")
+# El lector vive en camara/, dos carpetas mas arriba, y plantillas.npz va a su
+# lado: lo carga el, no este script.
+CAMARA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+sys.path.insert(0, os.path.abspath(CAMARA))
 from leer_hoja import ALFABETO, normalizar, LADO_PLANTILLA
 
 FUENTES = [
@@ -62,7 +66,7 @@ def main():
                 continue
             if v is not None:
                 pilas.append(v); etiquetas.append(i)
-    np.savez_compressed("plantillas.npz",
+    np.savez_compressed(os.path.join(os.path.abspath(CAMARA), "plantillas.npz"),
                         pilas=np.array(pilas, dtype=np.float32),
                         etiquetas=np.array(etiquetas, dtype=np.int16),
                         alfabeto=np.array(list(ALFABETO)))

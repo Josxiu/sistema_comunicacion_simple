@@ -12,6 +12,8 @@ camara/pruebas/hoja/fotos_originales/
 # Pruebas con tesseract que no se suben al repositorio
 camara/pruebas/tx_camara_tesseract.py
 
-# fotos de trabajo que escribe tx_camara_hoja al cargar o capturar: son de
-# usar y tirar, fotos/ es el banco de pruebas y no se toca
-camara/pruebas/hoja/capturas/
+# fotos de trabajo que escribe el transmisor al cargar o capturar: son de
+# usar y tirar, y van aparte de camara/pruebas/hoja/fotos/, que es el banco de
+# pruebas y esta versionado. Sin carpeta: la escriben tanto camara/tx_camara.py
+# como la copia de pruebas.
+capturas/

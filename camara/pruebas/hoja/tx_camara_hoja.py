@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """TRANSMISOR PARA LA CAMARA: se digita la cuadricula o se carga desde foto.
-(Versión integrada con leer_hoja.py en camara/pruebas/hoja)
+(Banco de pruebas de la carga desde foto; el lector es camara/leer_hoja.py)
 
     Se abre en VS Code y se le da al boton de play. No lleva argumentos.
 
@@ -25,10 +25,9 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 from PIL import Image, ImageTk
 
-# Rutas relativas para importar rx_camara (en camara/) y leer_hoja (en esta misma carpeta)
+# rx_camara y leer_hoja viven los dos en camara/, dos carpetas mas arriba.
 DIR_ACTUAL = Path(__file__).resolve().parent
 sys.path.insert(0, str(DIR_ACTUAL.parent.parent))      # camara/
-sys.path.insert(0, str(DIR_ACTUAL))                    # camara/pruebas/hoja/
 
 import rx_camara as C          # la codificacion compartida con el receptor
 import leer_hoja as LH         # pipeline de PDI para leer la hoja impresa
