@@ -17,3 +17,9 @@ camara/pruebas/tx_camara_tesseract.py
 # pruebas y esta versionado. Sin carpeta: la escriben tanto camara/tx_camara.py
 # como la copia de pruebas.
 capturas/
+
+# datos del experimento de aprendizaje: 14 MB y se rehacen corriendo
+# sacar_celdas.py y hacer_datos.py, que llevan la semilla fija. El modelo
+# entrenado (modelo.npz, medio mega) si se sube.
+camara/pruebas/hoja/aprendizaje/celdas.npz
+camara/pruebas/hoja/aprendizaje/datos.npz
