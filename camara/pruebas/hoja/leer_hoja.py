@@ -279,6 +279,84 @@ def sesgo(mascara, vertical, largo_min):
     return float(np.median(pendientes)) if pendientes else 0.0
 
 
+# Tinta por linea a partir de la cual se considera que la linea es SOLIDA.
+# Medido sobre la hoja enderezada: dentro de un marco impreso las lineas dan
+# 0,99, y la orilla que mas se le parece sin serlo -la primera columna de
+# TRAMANDA, negra en 8 de sus 9 celdas- se queda en 0,94. Ver quitar_marco.
+SOLIDO_MARCO = 0.97
+
+# Y no puede ser mas gruesa que esto, medido contra el lado corto de la hoja.
+# Un marco impreso ocupa un 4%; un anillo entero de celdas negras ocuparia una
+# celda, que es un 12% en la hoja mas tupida del banco (TRAMANDA, 8 celdas en
+# el lado corto). El tope las separa sin tener que saber el tamaño de celda,
+# que en este punto todavia no se ha medido.
+GRUESO_MARCO = 0.10
+
+
+def quitar_marco(derecha):
+    """Recorta el MARCO negro grueso, si la hoja lleva uno.
+
+    Hay hojas impresas con un recuadro negro rodeando la tabla entera. Entonces
+    las cuatro esquinas que encuentra esquinas_de_la_tabla son las del MARCO y
+    no las de la primera y la ultima celda, asi que el rectangulo enderezado
+    mide de mas: la reticula se tiende sobre un area mayor que la tabla y cada
+    celda queda corrida una fraccion de celda. Las del borde pierden un trozo
+    de letra y se leen mal.
+
+    Esto era EL UNICO fallo en VERDE del banco -mal leida y encima dada por
+    segura- y por eso merece arreglo aparte: los 10 errores en verde de las 27
+    fotos son los de esa hoja, en sus tres fotos, y siempre en las mismas
+    celdas del borde. La comprobacion de estabilidad no los caza porque el
+    marco se cuela de verdad dentro de la celda: mirar con otro umbral lo
+    vuelve a encontrar igual de nitido.
+
+    Se reconoce por la tinta de cada linea pegada al borde. Un marco es una
+    banda SOLIDA y corta: 28 lineas seguidas al 0,99 y luego una caida seca a
+    0,54. Lo que mas se le parece sin serlo es una orilla de recuadros negros,
+    y no llega: la primera columna de TRAMANDA, negra en 8 de sus 9 celdas, da
+    0,94 y ademas no cae, sigue igual toda la celda. Entre 0,94 y 0,99 hay
+    sitio de sobra para el corte.
+
+    Se piden las CUATRO bandas a la vez y de grosor parecido, porque un marco
+    es un anillo. Asi una hoja sin marco no se toca aunque una de sus orillas
+    salga casi toda negra, que es el caso que de verdad se da.
+    """
+    H, W = derecha.shape
+    # El tamaño de celda aun no se ha medido, pero para aplanar la luz basta
+    # con que la ventana sea mayor que una celda: se toma el mismo orden que
+    # usa celdas_de_la_tabla para el largo de las rayas.
+    b = tinta_de_la_hoja(derecha, max(12, min(H, W) // 12)) > 0
+    fil, col = b.mean(axis=1), b.mean(axis=0)
+
+    def banda(perfil):
+        """Grosor de la banda solida pegada a este borde, 0 si no la hay."""
+        # Las primeras lineas pueden venir a medias porque warpPerspective
+        # mezcla el borde con el blanco de fuera (0,00 0,24 0,45 0,83 y ya
+        # 0,99). Se le permite ese arranque antes de empezar a contar.
+        arranque = max(3, int(0.02 * len(perfil)))
+        ini = next((i for i in range(min(arranque, len(perfil)))
+                    if perfil[i] >= SOLIDO_MARCO), None)
+        if ini is None:
+            return 0
+        i = ini
+        while i < len(perfil) and perfil[i] >= SOLIDO_MARCO:
+            i += 1
+        return i
+
+    ar, ab = banda(fil), banda(fil[::-1])
+    iz, de = banda(col), banda(col[::-1])
+    anchos = (ar, ab, iz, de)
+    if min(anchos) < 3:                       # falta algun lado: no es un anillo
+        return derecha
+    if max(anchos) > GRUESO_MARCO * min(H, W):   # demasiado gordo para ser marco
+        return derecha
+    if max(anchos) > 3 * min(anchos):         # un anillo tiene grosor parejo
+        return derecha
+    if H - ar - ab < 0.4 * H or W - iz - de < 0.4 * W:
+        return derecha                        # no dejaria hoja que leer
+    return derecha[ar:H - ab, iz:W - de]
+
+
 def afinar(derecha):
     """Quita el giro y el sesgo que quedaron tras la homografia."""
     H, W = derecha.shape
@@ -645,7 +723,9 @@ def leer_hoja(ruta, plantillas=None, devolver_debug=False,
     if esquinas is None:
         return None, "no se ve el marco de la tabla", None
 
-    derecha = afinar(enderezar(img, esquinas))
+    # El marco, si lo hay, se quita ANTES de contar celdas: si no, la reticula
+    # se tiende sobre el marco mas la tabla y todas las celdas quedan corridas.
+    derecha = quitar_marco(afinar(enderezar(img, esquinas)))
     cajas, filas, cols = celdas_de_la_tabla(derecha, tamaño)
     if not cajas:
         return None, "se ve el marco pero no las celdas de adentro", None
