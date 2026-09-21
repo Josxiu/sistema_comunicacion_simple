@@ -13,10 +13,25 @@ Con --camara se abre una ventana con lo que ve la camara, la rejilla que ha
 encontrado dibujada encima y las letras que va leyendo: ESPACIO junta esa
 lectura con las anteriores y Q sale. Sin ver la imagen no hay forma de apuntar.
 
-Lo de --tamaño no es un capricho: contar cuantas celdas hay es la parte que
-peor se porta, y el dia de la prueba el tamaño se sabe con mirar la hoja.
-Dandolo se salta el conteo y solo queda leer las celdas, que es lo que si va
-bien. Eso si, no arregla una foto en la que el marco salga torcido.
+OJO CON --tamaño: parece que tiene que ayudar y MIDE PEOR. Se escribio para
+leer_hoja, donde si se salta el conteo de celdas, que es la parte que peor se
+porta. Pero leer_hoja_girando lo que hace es probar varias vueltas y quedarse
+con la que convence, y su mejor señal para descartar una vuelta equivocada es
+justo que sale una tabla del tamaño que no es. Forzando el tamaño, TODAS las
+vueltas dan una tabla del tamaño pedido y esa señal desaparece. Medido sobre
+las 27 fotos del banco:
+
+                           sin decirlo   diciendolo
+    celdas bien             1671/1693    1488/1693
+    tamaño mal                      0            3
+    y sobre fotos anchas:
+    celdas bien             1598/1693    1422/1693
+    mal leidas y por buenas         3           35
+
+Tambien se probo a usarlo solo para DESCARTAR las vueltas que no dan ese
+tamaño, en vez de imponerlo: quita los 35 errores pero sigue perdiendo celdas
+(1415/1693). Asi que el tamaño se deja sin decir, y esta opcion queda para
+depurar con leer_hoja a secas.
 
 Sale la matriz lista para pegar en el transmisor. Solo necesita numpy y
 opencv, igual que rx_camara.py; las plantillas de las letras vienen ya

@@ -41,6 +41,9 @@ menos que digitar 80 celdas a mano con el reloj corriendo.
                      que mirar cuando algo no cuadra.
     Ctrl+R           volver a encuadrar la ultima foto, desde la ventana
                      principal o desde el diagnostico.
+    F3               saltar a la siguiente celda dudosa (Shift+F3, al reves).
+                     Con ocho ? repartidas por una hoja de 80 celdas, buscarlas
+                     a ojo es lo que mas tarda antes de transmitir.
 
 El ? rojo marca una celda que el lector no las tiene todas consigo. Escribir
 encima de ella la da por revisada. Al transmitir se pregunta si quedan ?, y
@@ -1183,9 +1186,12 @@ class TxCamara(object):
         self.btn_diag = tk.Button(top, text="🔍 Ver diagnóstico",
                                   command=self.ver_diagnostico_foto)
         self.btn_diag.pack(side="left", padx=(8, 2))
+        self.btn_duda = tk.Button(top, text="Siguiente ? (F3)",
+                                  command=lambda: self.ir_a_la_duda(1))
+        self.btn_duda.pack(side="left", padx=2)
         if not puede:
             for b in (self.btn_foto, self.btn_camara, self.btn_diag,
-                      self.btn_refrescar):
+                      self.btn_refrescar, self.btn_duda):
                 b.config(state="disabled")
             self.cbo_camara.config(state="disabled")
             self._motivo_sin_lector = motivo
@@ -1330,6 +1336,11 @@ class TxCamara(object):
         # foto no sale a la primera, y buscar el boton cada vez cansa.
         self.root.bind("<Control-r>", lambda e: self.recortar_fotografia())
         self.root.bind("<Control-R>", lambda e: self.recortar_fotografia())
+        # F3 va saltando de celda dudosa en celda dudosa (Shift+F3, al reves).
+        # Es lo que mas tiempo ahorra al revisar: las ? estan repartidas y
+        # buscarlas a ojo por una hoja de 80 celdas es lo lento.
+        self.root.bind("<F3>", lambda e: self.ir_a_la_duda(1))
+        self.root.bind("<Shift-F3>", lambda e: self.ir_a_la_duda(-1))
         self.root.bind("<Configure>", lambda e: self.dibujar_grid())
         self.root.protocol("WM_DELETE_WINDOW", self.cerrar)
         self._bucle()
@@ -1845,6 +1856,37 @@ class TxCamara(object):
         else:
             return
         self._regenerar()
+
+    def ir_a_la_duda(self, hacia=1):
+        """Salta a la siguiente celda marcada con ?, dando la vuelta al final.
+
+        Con ocho dudas repartidas por una hoja de 80 celdas, buscarlas a ojo es
+        lo que mas tiempo se lleva antes de transmitir. Con esto se recorren
+        una por una y se corrigen sin levantar la vista de la cuadricula.
+        """
+        if not self.confianzas:
+            self.lbl_est.config(text="No hay ninguna celda dudosa: esta matriz "
+                                     "no viene de una foto.", fg=AZUL)
+            return
+        n = self.filas * self.cols
+        if not n:
+            return
+        aqui = self.cur[0] * self.cols + self.cur[1]
+        for paso in range(1, n + 1):
+            k = (aqui + paso * hacia) % n
+            f, c = divmod(k, self.cols)
+            if LH is not None and LH.es_dudosa(self.confianzas, f, c):
+                self.cur = [f, c]
+                self.dibujar_grid()
+                quedan = self.celdas_por_revisar()
+                self.lbl_est.config(
+                    text="Celda dudosa [fila %d, col %d] = '%s'  ·  quedan %d "
+                         "por revisar  ·  escribe encima para darla por buena"
+                         % (f + 1, c + 1, self.grid[f][c], quedan), fg=AMBAR)
+                self.foco_cuadricula()
+                return
+        self.lbl_est.config(text="No queda ninguna celda dudosa por revisar.",
+                            fg=VERDE)
 
     def _revisada(self, f, c):
         """La celda (f, c) queda dada por buena: se le quita el ?."""
