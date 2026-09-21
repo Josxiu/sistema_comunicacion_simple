@@ -812,7 +812,8 @@ def _calidad(grid, conf):
 CALIDAD_FIRME = 0.125
 
 
-def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
+def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None,
+                      devolver_debug=False):
     """Prueba varias maneras de mirar la foto y se queda con la que convence.
 
     Se prueban las cuatro vueltas de cuarto y, de cada una, la foto tal cual y
@@ -836,6 +837,8 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
     img = (ruta if isinstance(ruta, np.ndarray)
            else cv2.imread(str(ruta), cv2.IMREAD_GRAYSCALE))
     if img is None:
+        if devolver_debug:
+            return None, "no se pudo abrir la imagen", None, None
         return None, "no se pudo abrir la imagen", None
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -848,7 +851,7 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
     # Se prueba primero la foto tal cual y sin girar, que es el caso normal, y
     # si ya convence no se prueban las otras siete: ocho intentos cuestan ocho
     # veces mas y la mayoria de las fotos salen bien a la primera.
-    mejor = (None, "no se ve ninguna cuadricula", None, -1.0, 0, False)
+    mejor = (None, "no se ve ninguna cuadricula", None, -1.0, 0, False, None)
     for base, orillado in ((img, False), (con_marco, True)):
         if mejor[3] >= CALIDAD_FIRME:
             break
@@ -862,17 +865,25 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
             t = tamaño
             if t and grados in (90, 270):
                 t = (t[1], t[0])       # de canto, filas y columnas se cambian
-            grid, nota, conf = leer_hoja(vista, plantillas, tamaño=t)
+            if devolver_debug:
+                grid, nota, extra = leer_hoja(
+                    vista, plantillas, tamaño=t, devolver_debug=True)
+                conf = extra[0] if extra else None
+            else:
+                grid, nota, conf = leer_hoja(vista, plantillas, tamaño=t)
+                extra = None
             q = _calidad(grid, conf)
             if avisar:
                 avisar("   %3d grados%s -> %-12s calidad %.3f"
                        % (grados, " con margen" if orillado else "          ",
                           nota if grid else "no lee", q))
             if q > mejor[3]:
-                mejor = (grid, nota, conf, q, grados, orillado)
+                mejor = (grid, nota, conf, q, grados, orillado, extra)
 
-    grid, nota, conf, q, grados, orillado = mejor
+    grid, nota, conf, q, grados, orillado, extra = mejor
     if grid is None:
+        if devolver_debug:
+            return None, nota, None, None
         return None, nota, None
     detalles = []
     if grados:
@@ -884,6 +895,9 @@ def leer_hoja_girando(ruta, plantillas=None, tamaño=None, avisar=None):
     if q < CALIDAD_FIRME:
         nota += "\n   OJO: lectura floja (calidad %.3f). Repite la foto mas " \
                 "cerca, mas plana y sin sombras encima." % q
+    if devolver_debug:
+        debug_info = (extra[1], extra[2]) if (extra and len(extra) >= 3) else (None, None)
+        return grid, nota, conf, debug_info
     return grid, nota, conf
 
 
@@ -957,6 +971,113 @@ def lado_a_lado(izquierda, derecha, alto=620):
     derecha = a_ese_alto(derecha)
     separador = np.full((alto, 6, 3), 40, np.uint8)
     return np.hstack([izquierda, separador, derecha])
+
+
+def tablero_digital(grid, conf=None, alto_target=620, duda=DUDA):
+    """Genera una imagen BGR con la matriz digital limpia y contrastada."""
+    filas = len(grid)
+    cols = len(grid[0])
+    lado = max(26, min(alto_target // filas, 75))
+    ancho = cols * lado
+    alto = filas * lado
+    t = np.full((alto, ancho, 3), 35, dtype=np.uint8)
+    for f in range(filas):
+        for c in range(cols):
+            x0, y0 = c * lado, f * lado
+            x1, y1 = x0 + lado, y0 + lado
+            v = grid[f][c]
+            seguro = (conf[f][c] >= duda) if conf else True
+            if v == NEGRO:
+                cv2.rectangle(t, (x0, y0), (x1, y1), (20, 20, 20), -1)
+                cv2.rectangle(t, (x0, y0), (x1, y1), (70, 70, 70), 1)
+            elif v == BLANCO:
+                cv2.rectangle(t, (x0, y0), (x1, y1), (245, 245, 245), -1)
+                cv2.rectangle(t, (x0, y0), (x1, y1), (180, 180, 180), 1)
+            else:
+                fondo = (240, 240, 240) if seguro else (180, 215, 255)
+                cv2.rectangle(t, (x0, y0), (x1, y1), fondo, -1)
+                borde = (90, 200, 90) if seguro else (30, 90, 240)
+                cv2.rectangle(t, (x0, y0), (x1, y1), borde, 2 if not seguro else 1)
+                escala = max(0.5, lado / 46.0)
+                (tw, th), _ = cv2.getTextSize(v, cv2.FONT_HERSHEY_SIMPLEX, escala, 2)
+                tx = x0 + (lado - tw) // 2
+                ty = y0 + (lado + th) // 2
+                cv2.putText(t, v, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, escala, (15, 15, 15), 2, cv2.LINE_AA)
+                if not seguro:
+                    cv2.putText(t, '?', (x1 - 13, y0 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 220), 1, cv2.LINE_AA)
+    return t
+
+
+def graficar_lectura(grid, nota, conf=None, derecha=None, cajas=None,
+                     titulo="Matriz detectada", esperar=True):
+    """Muestra una ventana grafica con la hoja detectada y la matriz digital.
+
+    Permite ver al instante:
+      - Si el marco y la homografia encajaron bien sobre la hoja.
+      - Si las casillas detectadas (verde = seguro, naranja = dudoso) corresponden.
+      - La matriz final decodificada al lado para contrastar errores con facilidad.
+    """
+    if not hay_pantalla():
+        return
+
+    alto_vista = 600
+    if derecha is not None and cajas:
+        izq = panel_de_lectura(derecha, cajas, grid, conf)
+    else:
+        izq = None
+
+    der = tablero_digital(grid, conf, alto_target=alto_vista)
+    if izq is not None:
+        cuerpo = lado_a_lado(izq, der, alto=alto_vista)
+    else:
+        cuerpo = der
+
+    ancho_total = cuerpo.shape[1]
+    banner_alto = 54
+    pie_alto = 32
+
+    banner = np.full((banner_alto, ancho_total, 3), 26, dtype=np.uint8)
+    q = _calidad(grid, conf)
+    if q >= CALIDAD_FIRME:
+        color_q = (90, 200, 90)
+        estado_q = "Lectura Firme"
+    elif q > 0:
+        color_q = (50, 120, 240)
+        estado_q = "Lectura Dudosa (revisar naranja ?)"
+    else:
+        color_q = (180, 180, 180)
+        estado_q = "Calidad N/D"
+
+    texto_izq = "%s   -   %s" % (titulo, nota.split("\n")[0])
+    texto_der = "Calidad: %.3f (%s)" % (q, estado_q) if q > 0 else estado_q
+    cv2.putText(banner, texto_izq, (14, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                (240, 240, 240), 2, cv2.LINE_AA)
+    (tw, _), _ = cv2.getTextSize(texto_der, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+    cv2.putText(banner, texto_der, (max(14, ancho_total - tw - 14), 34),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_q, 2, cv2.LINE_AA)
+
+    pie = np.full((pie_alto, ancho_total, 3), 26, dtype=np.uint8)
+    leyenda = "[Verde: seguro]   [Naranja: dudoso ?]   [Negro: #]   [Blanco: _]   |   Cualquier tecla / Q para cerrar"
+    cv2.putText(pie, leyenda, (14, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.44,
+                (180, 180, 180), 1, cv2.LINE_AA)
+
+    completa = np.vstack([banner, cuerpo, pie])
+
+    # Redimensionar si se pasa del tamaño estándar de pantalla
+    H, W = completa.shape[:2]
+    max_w, max_h = 1366, 740
+    if W > max_w or H > max_h:
+        factor = min(float(max_w) / W, float(max_h) / H)
+        completa = cv2.resize(completa, (int(W * factor), int(H * factor)),
+                              interpolation=cv2.INTER_AREA)
+
+    nom_ventana = "Diagnostico Matriz - %s" % titulo
+    cv2.namedWindow(nom_ventana, cv2.WINDOW_NORMAL)
+    cv2.imshow(nom_ventana, completa)
+    print("   (grafica abierta: pulsa cualquier tecla o 'q' en la ventana para continuar)")
+    if esperar:
+        cv2.waitKey(0)
+        cv2.destroyWindow(nom_ventana)
 
 
 def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
@@ -1077,6 +1198,13 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25):
 def main():
     args = [a for a in sys.argv[1:]]
     tamaño = None
+    sin_grafica = False
+    for i, a in enumerate(list(args)):
+        if a in ("--sin-grafica", "--no-gui"):
+            sin_grafica = True
+            args = [x for j, x in enumerate(args) if j != i]
+            break
+
     for i, a in enumerate(list(args)):
         if a in ("--tamaño", "--tamano", "-t") and i + 1 < len(args):
             try:
@@ -1107,10 +1235,15 @@ def main():
         args = [ruta]
 
     for ruta in args:
-        grid, nota, conf = leer_hoja_girando(ruta, tamaño=tamaño)
+        grid, nota, conf, debug = leer_hoja_girando(
+            ruta, tamaño=tamaño, devolver_debug=True)
         print("\n%s  ->  %s" % (Path(ruta).name, nota))
         if grid:
             pintar(grid, conf)
+            if hay_pantalla() and not sin_grafica:
+                derecha, cajas = debug if debug else (None, None)
+                graficar_lectura(grid, nota, conf, derecha, cajas,
+                                 titulo=Path(ruta).name)
         else:
             print("   %s" % nota)
 
