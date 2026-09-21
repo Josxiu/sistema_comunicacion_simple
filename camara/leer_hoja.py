@@ -181,6 +181,86 @@ def rayas(binaria, lado_min, holgura_grados=0.0):
     return hor, ver
 
 
+
+# Cuanto papel se deja alrededor de la tabla al recortarla sola. No es adorno:
+# si la tabla llega justo al borde, las celdas de la orilla tocan el limite de
+# la imagen y celdas_de_la_tabla las descarta. Ver leer_hoja_girando.
+MARGEN_RECORTE = 0.06
+
+
+def buscar_la_tabla(img, margen=MARGEN_RECORTE):
+    """Donde esta la cuadricula dentro de la foto. Devuelve (x0, y0, x1, y1).
+
+    Devuelve None si no encuentra nada que valga la pena recortar.
+
+    Hace falta por como es la camara del telefono: entrega SIEMPRE en
+    horizontal, 1280x720 o 1920x1080, asi que una hoja vertical ocupa una
+    franja estrecha del centro y el resto es mesa. Y eso no es solo feo, se
+    paga: leer_hoja encoge la foto a 1400 px POR EL LADO MAYOR, que en un
+    encuadre asi es el ancho de la mesa, de modo que la tabla se queda con
+    muchos menos pixeles de los que la foto tenia. Medido recreando el
+    encuadre 16:9 sobre las 27 fotos del banco: de 1671/1693 celdas a
+    1232/1693, con SIETE hojas cuyo tamaño se detecta mal -una de 9x8 leida
+    como 8x5- y cuatro celdas mal leidas y dadas por buenas.
+
+    Recortar antes de encoger devuelve el caso al terreno normal, que es lo
+    que se hacia a mano.
+
+    Se busca igual que el marco en leer_hoja -rayas largas y recuadros negros,
+    todo junto- pero con el liston mas bajo, porque aqui no hay que leer nada:
+    solo hay que saber por donde cae la tabla. El trozo de tinta mas grande de
+    la foto, con la hoja delante, es la tabla.
+    """
+    gris = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    H0, W0 = gris.shape
+    # Se busca en pequeño: para saber DONDE esta la tabla sobra resolucion, y
+    # asi esto cuesta unos milisegundos aunque la foto venga a 12 megapixeles.
+    esc = min(1.0, 900.0 / max(H0, W0))
+    chica = (cv2.resize(gris, None, fx=esc, fy=esc, interpolation=cv2.INTER_AREA)
+             if esc < 1.0 else gris)
+
+    b = binarizar(aplanar_luz(chica))
+    # El liston va contra el lado MENOR y bastante mas bajo que en leer_hoja:
+    # la tabla puede ser una franja estrecha de la foto y sus rayas, cortas.
+    n = max(10, min(chica.shape) // 25)
+    hor, ver = rayas(b, n, holgura_grados=HOLGURA_MARCO)
+    solidos = cv2.morphologyEx(
+        b, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, n // 2),) * 2))
+    masa = cv2.dilate(cv2.bitwise_or(cv2.bitwise_or(hor, ver), solidos),
+                      np.ones((9, 9), np.uint8))
+
+    num, etq, est, _ = cv2.connectedComponentsWithStats(masa, 8)
+    if num < 2:
+        return None
+    i = 1 + int(np.argmax(est[1:, cv2.CC_STAT_AREA]))
+    x, y, w, h, area = (est[i, cv2.CC_STAT_LEFT], est[i, cv2.CC_STAT_TOP],
+                        est[i, cv2.CC_STAT_WIDTH], est[i, cv2.CC_STAT_HEIGHT],
+                        est[i, cv2.CC_STAT_AREA])
+    Hc, Wc = chica.shape
+    if w < 0.05 * Wc or h < 0.05 * Hc:
+        return None                      # una mota, no una tabla
+    if w > 0.92 * Wc and h > 0.92 * Hc:
+        return None                      # ya ocupa la foto entera: nada que cortar
+
+    # se devuelve en coordenadas de la foto ORIGINAL, con su margen de papel
+    mx, my = margen * w, margen * h
+    x0 = max(0, int((x - mx) / esc)); y0 = max(0, int((y - my) / esc))
+    x1 = min(W0, int((x + w + mx) / esc)); y1 = min(H0, int((y + h + my) / esc))
+    if x1 - x0 < 40 or y1 - y0 < 40:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def recortar_a_la_tabla(img, margen=MARGEN_RECORTE):
+    """La foto recortada a la tabla, o la misma foto si no se encontro."""
+    caja = buscar_la_tabla(img, margen)
+    if caja is None:
+        return img
+    x0, y0, x1, y1 = caja
+    return img[y0:y1, x0:x1]
+
+
 def quitar_giro(gris):
     """Pone la tabla derecha ANTES de buscarle las rayas.
 
@@ -991,7 +1071,7 @@ def leer_de_la_camara(fuente, cuadros=25, avisar=print):
                 continue
             fallos = 0
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
-            grid, nota, conf = leer_hoja(gris, plantillas)
+            grid, nota, conf = leer_hoja(recortar_a_la_tabla(gris), plantillas)
             if grid is None:
                 continue
             leidas += 1
@@ -1464,6 +1544,8 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
     # lectura VOTADA, no del ultimo cuadro que se miro. Ver el comentario del
     # ESPACIO mas abajo.
     votado_debug, votado_frame = (None, None), None
+    votado = None          # la ultima lectura que ya se conto, para no repetirla
+    ultima_salida = None
     fallos = 0
     try:
         while True:
@@ -1490,7 +1572,25 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
                 break
             gris = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
             vista = f.copy() if f.ndim == 3 else cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
-            lector.ofrecer(gris, vista)
+            # AQUI SI se recorta solo, y en la foto fija no. La diferencia no
+            # es capricho: la camara entrega siempre en horizontal, asi que una
+            # hoja vertical sale en una franja del centro y no hay nadie que lo
+            # encuadre mejor; recortar es lo unico que se puede hacer. Medido
+            # recreando ese encuadre sobre las 27 fotos del banco: 1232/1693
+            # celdas sin recortar y 1598/1693 recortando, y las hojas cuyo
+            # tamaño se detecta mal pasan de siete a una.
+            #
+            # Con la foto fija es al reves: ahi el encuadre ya lo eligio una
+            # persona, y recortar por encima sale peor -el banco normal pasa de
+            # 0 a 2 celdas mal leidas y dadas por buenas-. Por eso en la foto
+            # el recorte solo se SUGIERE en la ventana y se confirma a mano.
+            recorte = buscar_la_tabla(gris)
+            if recorte is not None:
+                rx0, ry0, rx1, ry1 = recorte
+                lector.ofrecer(gris[ry0:ry1, rx0:rx1], vista)
+                cv2.rectangle(vista, (rx0, ry0), (rx1, ry1), (0, 200, 255), 2)
+            else:
+                lector.ofrecer(gris, vista)
 
             guardado = lector.ultimo()
             salida, cuadro_leido = guardado if guardado else (None, None)
@@ -1499,6 +1599,7 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
                 conf, derecha, cajas = salida[2]
                 forma_ultima = (len(grid), len(grid[0]))
                 ultimo = (grid, conf)
+                ultima_salida = salida      # cambia SOLO al terminar un analisis
                 ultimo_debug = (derecha, cajas)
                 ultimo_frame = cuadro_leido
                 panel = panel_de_lectura(derecha, cajas, grid, conf)
@@ -1525,8 +1626,19 @@ def mirar_con_la_camara(fuente, tamaño=None, cuadros=25, devolver_debug=False):
             tecla = cv2.waitKey(1) & 0xFF
             if tecla in (ord("q"), ord("Q"), 27):
                 break
-            if tecla == 32 and ultimo is not None:
-                # juntar esta lectura con las anteriores de la misma forma
+            if tecla == 32 and ultimo is not None and ultima_salida is not votado:
+                # juntar esta lectura con las anteriores de la misma forma.
+                #
+                # 'ultimo is not votado' es el que impide que valga tener la
+                # tecla PULSADA. El teclado repite unas 30 veces por segundo y
+                # el analisis va a unas 3, asi que manteniendo ESPACIO se
+                # metian diez votos IDENTICOS por cada lectura de verdad: se
+                # llegaba a las 25 en menos de un segundo con dos o tres
+                # lecturas distintas, y el acuerdo salia 1.0 porque todos los
+                # votos eran la misma lectura repetida. O sea que la confianza
+                # decia "las 25 coinciden" cuando en realidad habia mirado tres
+                # veces. Ahora solo cuenta una lectura NUEVA.
+                votado = ultima_salida
                 grid, conf = ultimo
                 leidas += 1
                 # La foto y el diagnostico se congelan AQUI, con la lectura que
